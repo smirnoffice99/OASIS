@@ -1,0 +1,66 @@
+US Patent No. 10,123,456
+Title: Location Measurement System Using Wireless Signals
+Published: March 15, 2022
+
+ABSTRACT
+A system and method for indoor location measurement using multiple wireless signal types.
+
+CLAIMS
+1. A method for determining a location of a mobile device comprising:
+   receiving wireless signals from a plurality of access points;
+   computing a location estimation value from the received signals; and
+   outputting a determined location.
+
+DESCRIPTION
+
+Column 1, Lines 1-20:
+This invention relates to indoor positioning systems that overcome limitations
+of conventional GPS-based methods in indoor environments.
+
+Column 2, Lines 1-30:
+Prior art indoor positioning systems rely solely on RSSI values, which are
+susceptible to multipath interference. The present invention combines multiple
+signal metrics to improve accuracy.
+
+Column 3, Lines 15-40:
+The location calculation means (positioning module) of the present invention
+receives RSSI data from surrounding access points and base stations.
+The positioning module processes the received signal data using a
+Kalman filter algorithm to produce a smoothed location estimate.
+The positioning module further incorporates a signal strength threshold
+to filter out unreliable measurements from distant transmitters.
+The output of the positioning module is a two-dimensional coordinate pair
+representing the estimated current location of the mobile device.
+
+Column 4, Lines 1-25:
+The system architecture comprises three main components: a signal collector,
+a signal processor, and a location output unit. The signal collector
+continuously scans available wireless channels. The signal processor
+applies weighting functions based on signal reliability metrics.
+
+Column 5, Lines 10-30:
+The reference value calculation method of the present invention computes
+a location reference value as follows: first, RSSI values from at least
+three access points are collected simultaneously. Second, a distance
+estimate is computed from each RSSI value using a path loss model.
+Third, a weighted average of the distance estimates is computed,
+where weights are inversely proportional to estimated measurement uncertainty.
+This reference value calculation method provides improved accuracy compared
+to simple RSSI averaging approaches used in the prior art.
+
+Column 6, Lines 5-20:
+The mobile terminal embodiment includes a wireless signal receiver module
+and a microprocessor running the location estimation algorithm. The terminal
+periodically updates its location estimate at a configurable refresh rate.
+
+Paragraphs [0045]-[0052]: (See also D2 for cross-reference)
+The reference value computation in this embodiment uses a fixed weighting
+scheme based on empirically determined coefficients. The weights do not
+adapt to changes in the signal environment or user behavior patterns.
+This is a known limitation of the present approach.
+
+NOTE: This prior art document does NOT disclose:
+- Dynamic adjustment of positioning reference values based on user movement patterns
+- Fusion with inertial sensor (IMU) data
+- Re-calculation of reference values upon handover events
+- Weighted average combining RSSI, RTT, and AoA simultaneously

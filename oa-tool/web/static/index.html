@@ -1,0 +1,1678 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OASIS — 특허 의견제출통지서 대응 자동화</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --primary: #1a56db;
+      --primary-dark: #1340a0;
+      --sidebar-bg: #1e2433;
+      --sidebar-text: #c8d0e0;
+      --sidebar-hover: #2a3347;
+      --status-pending: #6b7280;
+      --status-progress: #d97706;
+      --status-done: #059669;
+      --bg: #f4f6fb;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #1a202c;
+      --text-muted: #64748b;
+      --danger: #dc2626;
+    }
+
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* ── Header ─────────────────────────────────────── */
+    header {
+      background: var(--sidebar-bg);
+      color: #fff;
+      padding: 0 24px;
+      height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      z-index: 10;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    header h1 { font-size: 1.15rem; font-weight: 700; letter-spacing: 0.5px; }
+    header h1 span { color: #60a5fa; }
+    #case-badge {
+      background: rgba(255,255,255,0.12);
+      border-radius: 6px;
+      padding: 4px 12px;
+      font-size: 0.8rem;
+      color: #94a3b8;
+    }
+    #case-badge.active { color: #60a5fa; font-weight: 600; }
+
+    /* ── Layout ──────────────────────────────────────── */
+    .layout { display: flex; flex: 1; overflow: hidden; }
+
+    /* ── Sidebar ─────────────────────────────────────── */
+    .sidebar {
+      width: 280px;
+      flex-shrink: 0;
+      background: var(--sidebar-bg);
+      color: var(--sidebar-text);
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid #2d3748;
+      overflow-y: auto;
+    }
+    .sidebar-section { padding: 16px; border-bottom: 1px solid #2d3748; }
+    .sidebar-section h3 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; color: #4a5568; margin-bottom: 12px; }
+
+    /* 사건 선택 */
+    #case-input-group { display: flex; gap: 6px; }
+    #case-input {
+      width: 100%;
+      flex: 1;
+      background: #2a3347;
+      border: 1px solid #3d4f6e;
+      border-radius: 6px;
+      color: #e2e8f0;
+      padding: 7px 10px;
+      font-size: 0.82rem;
+      outline: none;
+    }
+    #case-input:focus { border-color: var(--primary); }
+    #case-input::placeholder { color: #4a5568; }
+
+    .btn-sm {
+      padding: 7px 12px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-size: 0.8rem;
+      font-weight: 600;
+      transition: background 0.15s;
+    }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: var(--primary-dark); }
+    .btn-danger { background: #7f1d1d; color: #fca5a5; }
+    .btn-danger:hover { background: var(--danger); color: #fff; }
+    .btn-muted { background: #2a3347; color: #94a3b8; border: 1px solid #3d4f6e; }
+    .btn-muted:hover { background: #374561; }
+
+    /* 거절이유 목록 */
+    .rejection-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+      border: 1px solid transparent;
+    }
+    .rejection-item:hover { background: var(--sidebar-hover); }
+    .rejection-item.active { background: #1a3a6b; border-color: #2563eb; }
+    .rejection-item .rej-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .rej-num { font-size: 0.75rem; font-weight: 700; color: #60a5fa; }
+    .rej-type { font-size: 0.75rem; color: #94a3b8; }
+    .rej-claims { font-size: 0.72rem; color: #64748b; }
+
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      margin-left: auto;
+    }
+    .status-dot.pending { background: var(--status-pending); }
+    .status-dot.in_progress { background: var(--status-progress); animation: pulse 1.5s infinite; }
+    .status-dot.concluded { background: var(--status-done); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    .step-progress { display: flex; gap: 3px; margin-top: 6px; }
+    .step-pip {
+      height: 3px;
+      flex: 1;
+      border-radius: 2px;
+      background: #3d4f6e;
+    }
+    .step-pip.done { background: var(--status-done); }
+    .step-pip.current { background: var(--status-progress); }
+
+    /* ── Main ────────────────────────────────────────── */
+    .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* ── 랜딩 화면 ───────────────────────────────────── */
+    #landing {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 16px;
+      color: var(--text-muted);
+    }
+    #landing .logo-big { font-size: 3rem; margin-bottom: 8px; }
+    #landing p { font-size: 0.95rem; }
+
+    /* ── 분석 화면 ───────────────────────────────────── */
+    #analysis-view {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* 거절이유 헤더 */
+    .rej-info-bar {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+    .rej-info-bar .rej-title { font-size: 1rem; font-weight: 700; }
+    .rej-info-bar .rej-meta { font-size: 0.8rem; color: var(--text-muted); }
+    .step-indicator {
+      margin-left: auto;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      background: var(--bg);
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+    }
+
+    /* step 탭 */
+    .step-tabs {
+      display: flex;
+      gap: 4px;
+      padding: 10px 24px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      overflow-x: auto;
+    }
+    .step-tab {
+      padding: 5px 14px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      font-size: 0.78rem;
+      font-weight: 600;
+      background: transparent;
+      color: var(--text-muted);
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+    .step-tab:hover { border-color: var(--primary); color: var(--primary); }
+    .step-tab.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+    .step-tab.done { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
+
+    /* 결과 영역 */
+    .result-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+    }
+
+    .result-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      min-height: 200px;
+      position: relative;
+    }
+
+    /* 마크다운 스타일 */
+    .md-content h1, .md-content h2, .md-content h3 { margin: 16px 0 8px; color: #1a202c; }
+    .md-content h2 { font-size: 1.1rem; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+    .md-content h3 { font-size: 0.95rem; }
+    .md-content p { margin: 8px 0; line-height: 1.7; font-size: 0.9rem; }
+    .md-content ul, .md-content ol { margin: 8px 0 8px 20px; }
+    .md-content li { margin: 4px 0; line-height: 1.6; font-size: 0.9rem; }
+    .md-content table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.85rem; }
+    .md-content th, .md-content td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+    .md-content th { background: var(--bg); font-weight: 600; }
+    .md-content code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; }
+    .md-content pre { background: #f1f5f9; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+    .md-content blockquote { border-left: 3px solid var(--primary); padding-left: 12px; color: var(--text-muted); margin: 8px 0; }
+    .md-content strong { color: #1a202c; }
+
+    /* 스트리밍 커서 */
+    .streaming-cursor::after {
+      content: '▋';
+      animation: blink 0.8s infinite;
+      color: var(--primary);
+    }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+    /* 플레이스홀더 */
+    .placeholder {
+      text-align: center;
+      color: var(--text-muted);
+      padding: 60px 0;
+    }
+    .placeholder .icon { font-size: 2.5rem; margin-bottom: 12px; }
+    .placeholder p { font-size: 0.9rem; }
+
+    /* 액션 바 */
+    .action-bar {
+      background: var(--card);
+      border-top: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      padding: 9px 18px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+      transition: all 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-execute { background: var(--primary); color: #fff; }
+    .btn-execute:hover:not(:disabled) { background: var(--primary-dark); }
+    .btn-approve { background: #059669; color: #fff; }
+    .btn-approve:hover:not(:disabled) { background: #047857; }
+    .btn-skip { background: #f59e0b; color: #fff; }
+    .btn-skip:hover:not(:disabled) { background: #d97706; }
+    .btn-reopen { background: #6b7280; color: #fff; }
+    .btn-reopen:hover:not(:disabled) { background: #4b5563; }
+    .btn-cancel-approval { background: #92400e; color: #fde68a; }
+    .btn-cancel-approval:hover:not(:disabled) { background: #b45309; color: #fff; }
+    .btn-report { background: #7c3aed; color: #fff; }
+    .btn-report:hover:not(:disabled) { background: #6d28d9; }
+    .btn-download { background: #0891b2; color: #fff; }
+    .btn-download:hover:not(:disabled) { background: #0e7490; }
+
+    /* 피드백 입력 */
+    .feedback-row {
+      display: flex;
+      gap: 8px;
+      flex: 1;
+      min-width: 300px;
+      align-items: flex-end;
+    }
+    .feedback-wrapper {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+    .feedback-resize-handle {
+      width: 44px;
+      height: 6px;
+      background: #e2e8f0;
+      border-radius: 3px;
+      margin: 0 auto 4px;
+      cursor: ns-resize;
+      flex-shrink: 0;
+      transition: background 0.15s, transform 0.15s;
+      user-select: none;
+    }
+    .feedback-resize-handle:hover,
+    .feedback-resize-handle.dragging {
+      background: var(--primary);
+      transform: scaleY(1.4);
+    }
+    #feedback-input {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      outline: none;
+      color: var(--text);
+      background: var(--bg);
+      font-family: inherit;
+      line-height: 1.5;
+      min-height: 38px;
+      max-height: 300px;
+      resize: none;
+      overflow-y: auto;
+    }
+    #feedback-input:focus { border-color: var(--primary); background: #fff; }
+    #feedback-input::placeholder { color: var(--text-muted); }
+
+    /* 알림 */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1e2433;
+      color: #e2e8f0;
+      padding: 12px 20px;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      z-index: 1000;
+      transform: translateY(100px);
+      opacity: 0;
+      transition: all 0.3s;
+      max-width: 360px;
+    }
+    #toast.show { transform: translateY(0); opacity: 1; }
+    #toast.success { border-left: 4px solid #059669; }
+    #toast.error { border-left: 4px solid var(--danger); }
+    #toast.info { border-left: 4px solid var(--primary); }
+
+    /* 로딩 스피너 */
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* 완료 배너 */
+    #all-done-banner {
+      display: none;
+      background: linear-gradient(135deg, #065f46, #047857);
+      color: #fff;
+      padding: 14px 24px;
+      text-align: center;
+      font-size: 0.9rem;
+      font-weight: 600;
+      flex-shrink: 0;
+      gap: 10px;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    /* 리포트 초안 뷰 */
+    #report-view {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .report-header {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .report-header h2 { font-size: 1rem; font-weight: 700; }
+    .report-status {
+      margin-left: auto;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      background: var(--bg);
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+    }
+    .report-result-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+    }
+    .report-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+      min-height: 300px;
+    }
+    .report-action-bar {
+      background: var(--card);
+      border-top: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+
+    /* 모달 */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--card);
+      border-radius: 14px;
+      padding: 28px;
+      width: 480px;
+      max-width: 90vw;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .modal h2 { margin-bottom: 16px; font-size: 1.1rem; }
+    .modal .field { margin-bottom: 12px; }
+    .modal .field label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 4px; }
+    .modal input[type="file"] { font-size: 0.82rem; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+    /* 스크롤바 */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #3d4f6e; border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <h1>OA<span>SIS</span></h1>
+  <div id="case-badge">사건 미선택</div>
+</header>
+
+<!-- Layout -->
+<div class="layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <!-- ① 사건번호 -->
+    <div class="sidebar-section">
+      <h3>① 사건번호</h3>
+      <input id="case-input" type="text" placeholder="KR-2024-12345" style="width:100%;" />
+      <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;" id="quick-cases"></div>
+    </div>
+
+    <!-- ② 파일 업로드 -->
+    <div class="sidebar-section">
+      <h3>② 파일 업로드</h3>
+      <button class="btn-sm btn-muted" style="width:100%;" onclick="openUploadModal()">파일 추가...</button>
+      <div id="upload-status" style="margin-top:6px; font-size:0.75rem; color:#4a5568;"></div>
+    </div>
+
+    <!-- ③ 시작 -->
+    <div class="sidebar-section">
+      <h3>③ 분석 시작</h3>
+      <button class="btn-sm btn-primary" style="width:100%;" onclick="startCase()">OA 파싱 &amp; 시작</button>
+    </div>
+
+    <!-- 거절이유 목록 -->
+    <div class="sidebar-section" style="flex:1; overflow-y:auto;">
+      <h3>거절이유 목록</h3>
+      <div id="rejection-list">
+        <div style="color:#4a5568; font-size:0.8rem; padding:8px 0;">사건을 선택하면 표시됩니다.</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+
+    <!-- 완료 배너 -->
+    <div id="all-done-banner">
+      모든 거절이유 처리 완료!
+      <button class="btn btn-report" onclick="openReportView()">
+        영문 코멘트 초안 작성
+      </button>
+    </div>
+
+    <!-- 리포트 초안 뷰 -->
+    <div id="report-view">
+      <div class="report-header">
+        <button class="btn-sm btn-muted" onclick="closeReportView()">← 분석 화면</button>
+        <h2>영문 코멘트 초안</h2>
+        <span class="report-status" id="report-status">초안 없음</span>
+      </div>
+      <div class="report-result-area">
+        <div class="report-card">
+          <div class="placeholder" id="report-placeholder">
+            <div class="icon">📝</div>
+            <p><strong>초안 작성</strong> 버튼을 눌러 영문 코멘트 초안을 생성하세요.</p>
+          </div>
+          <div class="md-content" id="report-content" style="display:none;"></div>
+        </div>
+      </div>
+      <div class="report-action-bar">
+        <button class="btn btn-execute" id="btn-draft" onclick="generateDraft()">
+          ✦ 초안 작성
+        </button>
+        <button class="btn btn-approve" id="btn-finalize" onclick="finalizeReport()" disabled>
+          ✓ 최종 확정 (docx 생성)
+        </button>
+        <a id="download-link" style="display:none;" href="#" class="btn btn-download" download>
+          ⬇ 다운로드
+        </a>
+        <div class="feedback-row">
+          <input id="report-feedback" type="text" placeholder="수정 지시사항 입력 후 재작성..." />
+          <button class="btn btn-execute" id="btn-redraft" onclick="redraft()" disabled>
+            재작성
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 랜딩 -->
+    <div id="landing">
+      <div class="logo-big">⚖️</div>
+      <strong style="font-size:1.1rem;">OASIS</strong>
+      <p style="margin-bottom:20px;">의견제출통지서 대응 분석 자동화</p>
+      <div style="display:flex; flex-direction:column; gap:10px; text-align:left; width:320px;">
+        <div style="background:#fff; border:1px solid var(--border); border-radius:10px; padding:14px 18px; display:flex; align-items:center; gap:14px;">
+          <span style="background:#1a56db; color:#fff; border-radius:50%; width:26px; height:26px; display:flex; align-items:center; justify-content:center; font-size:0.8rem; font-weight:700; flex-shrink:0;">1</span>
+          <div>
+            <div style="font-weight:600; font-size:0.9rem;">사건번호 입력</div>
+            <div style="font-size:0.78rem; color:var(--text-muted); margin-top:2px;">왼쪽 사이드바에 사건번호를 입력하세요</div>
+          </div>
+        </div>
+        <div style="background:#fff; border:1px solid var(--border); border-radius:10px; padding:14px 18px; display:flex; align-items:center; gap:14px;">
+          <span style="background:#1a56db; color:#fff; border-radius:50%; width:26px; height:26px; display:flex; align-items:center; justify-content:center; font-size:0.8rem; font-weight:700; flex-shrink:0;">2</span>
+          <div>
+            <div style="font-weight:600; font-size:0.9rem;">파일 업로드</div>
+            <div style="font-size:0.78rem; color:var(--text-muted); margin-top:2px;">OA · 명세서 · 영문청구항 · 인용문헌</div>
+          </div>
+        </div>
+        <div style="background:#fff; border:1px solid var(--border); border-radius:10px; padding:14px 18px; display:flex; align-items:center; gap:14px;">
+          <span style="background:#1a56db; color:#fff; border-radius:50%; width:26px; height:26px; display:flex; align-items:center; justify-content:center; font-size:0.8rem; font-weight:700; flex-shrink:0;">3</span>
+          <div>
+            <div style="font-weight:600; font-size:0.9rem;">OA 파싱 &amp; 시작</div>
+            <div style="font-size:0.78rem; color:var(--text-muted); margin-top:2px;">분석 시작 버튼을 눌러 거절이유를 추출하세요</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 분석 화면 -->
+    <div id="analysis-view">
+
+      <!-- 거절이유 헤더 -->
+      <div class="rej-info-bar" id="rej-info-bar">
+        <div>
+          <div class="rej-title" id="rej-title">거절이유 선택</div>
+          <div class="rej-meta" id="rej-meta"></div>
+        </div>
+        <div class="step-indicator" id="step-indicator">-</div>
+      </div>
+
+      <!-- Step 탭 -->
+      <div class="step-tabs" id="step-tabs"></div>
+
+      <!-- 결과 영역 -->
+      <div class="result-area">
+        <div class="result-card" id="result-card">
+          <div class="placeholder" id="result-placeholder">
+            <div class="icon">📋</div>
+            <p>거절이유와 Step을 선택한 후 <strong>분석 실행</strong>을 누르세요.</p>
+          </div>
+          <div class="md-content" id="result-content" style="display:none;"></div>
+        </div>
+      </div>
+
+      <!-- 액션 바 -->
+      <div class="action-bar" id="action-bar">
+        <button class="btn btn-execute" id="btn-execute" onclick="executeStep()">
+          ▶ 분석 실행
+        </button>
+        <button class="btn btn-approve" id="btn-approve" onclick="approveStep()" disabled>
+          ✓ 승인
+        </button>
+        <button class="btn btn-cancel-approval" id="btn-cancel-approval" onclick="cancelApproval()" style="display:none;">
+          ↩ 승인 취소
+        </button>
+        <button class="btn btn-skip" id="btn-skip" onclick="skipStep()" disabled>
+          건너뛰기
+        </button>
+        <button class="btn btn-reopen" id="btn-reopen" onclick="reopenRejection()" style="display:none;">
+          재검토
+        </button>
+        <div class="feedback-row">
+          <div class="feedback-wrapper">
+            <div class="feedback-resize-handle" id="feedback-resize-handle" title="드래그하여 높이 조절"></div>
+            <textarea id="feedback-input" rows="1" placeholder="피드백 입력 후 재생성 버튼 클릭 (승인 전에만 사용)"></textarea>
+          </div>
+          <button class="btn btn-execute" id="btn-regen" onclick="regenStep()" disabled>
+            재생성
+          </button>
+        </div>
+      </div>
+
+    </div><!-- /analysis-view -->
+  </main>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<!-- 파일 업로드 모달 -->
+<div class="modal-overlay" id="upload-modal">
+  <div class="modal">
+    <h2>📁 파일 업로드</h2>
+    <div id="upload-modal-case" style="margin-bottom:14px; font-size:0.82rem; color:var(--text-muted); background:var(--bg); padding:6px 10px; border-radius:6px; border:1px solid var(--border);"></div>
+    <div class="field">
+      <label>의견제출통지서 (oa.pdf)</label>
+      <input type="file" id="up-oa" accept=".pdf,.txt" />
+    </div>
+    <div class="field">
+      <label>명세서 (spec.pdf)</label>
+      <input type="file" id="up-spec" accept=".pdf,.txt" />
+    </div>
+    <div class="field">
+      <label>영문 청구항 (claims_en.docx)</label>
+      <input type="file" id="up-claims" accept=".docx,.txt" />
+    </div>
+    <hr style="margin: 16px 0; border-color: var(--border);" />
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+      <label style="font-size:0.82rem; font-weight:500; color:#374151;">인용문헌 (선택)</label>
+      <button type="button" onclick="addCitationRow()"
+        style="background:#e8f0fe; border:none; border-radius:5px; padding:3px 10px; font-size:0.75rem; color:#1a56db; cursor:pointer; font-weight:600;">
+        + 추가
+      </button>
+    </div>
+    <div id="citations-list">
+      <div class="citation-row" style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+        <input type="text" value="D1" style="width:60px; border:1px solid var(--border); border-radius:6px; padding:5px 7px; font-size:0.82rem;" />
+        <input type="file" accept=".pdf,.txt" style="flex:1; font-size:0.8rem;" />
+        <button type="button" onclick="removeCitationRow(this)"
+          style="background:none; border:none; cursor:pointer; color:#9ca3af; font-size:1.1rem; padding:0 2px; line-height:1;" title="삭제">✕</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-muted" onclick="closeUploadModal()">취소</button>
+      <button class="btn-sm btn-primary" onclick="uploadFiles()">업로드</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// 상태
+// ============================================================
+const state = {
+  caseId: null,
+  session: null,
+  currentRejectionId: null,
+  currentStep: 1,
+  currentResult: '',
+  isStreaming: false,
+  hasResult: false,
+};
+
+const TYPE_LABELS = {
+  prior_art: '선행기술 위반',
+  clarity: '기재불비',
+  unity: '단일성 위반',
+  other: '기타',
+};
+
+// ============================================================
+// 초기화
+// ============================================================
+window.addEventListener('DOMContentLoaded', () => {
+  loadQuickCases();
+  document.getElementById('case-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') openUploadModal();
+  });
+  // 피드백 입력창: Enter는 줄바꿈(textarea 기본 동작), 재생성은 버튼으로만
+
+  // 피드백 입력창 상단 드래그 핸들
+  (function () {
+    const handle = document.getElementById('feedback-resize-handle');
+    const textarea = document.getElementById('feedback-input');
+    const MIN_H = 38;
+    const MAX_H = 300;
+
+    handle.addEventListener('mousedown', e => {
+      const startY = e.clientY;
+      const startH = textarea.offsetHeight;
+      handle.classList.add('dragging');
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
+
+      function onMove(e) {
+        // 핸들이 위에 있으므로: 위로 드래그(Y 감소) → 높이 증가
+        const delta = startY - e.clientY;
+        const newH = Math.min(MAX_H, Math.max(MIN_H, startH + delta));
+        textarea.style.height = newH + 'px';
+      }
+
+      function onUp() {
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      e.preventDefault();
+    });
+  })();
+});
+
+async function loadQuickCases() {
+  try {
+    const res = await fetch('/api/cases');
+    const data = await res.json();
+    const container = document.getElementById('quick-cases');
+    container.innerHTML = '';
+    data.cases.slice(0, 5).forEach(c => {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:inline-flex; align-items:center; gap:2px;';
+
+      const btn = document.createElement('button');
+      btn.className = 'btn-sm btn-muted';
+      btn.style.fontSize = '0.72rem';
+      btn.textContent = c.case_id;
+      btn.onclick = () => {
+        document.getElementById('case-input').value = c.case_id;
+        startCase();
+      };
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn-sm btn-danger';
+      delBtn.style.cssText = 'padding:4px 6px; font-size:0.7rem;';
+      delBtn.title = '사건 삭제';
+      delBtn.textContent = '✕';
+      delBtn.onclick = (e) => {
+        e.stopPropagation();
+        deleteCase(c.case_id);
+      };
+
+      wrap.appendChild(btn);
+      wrap.appendChild(delBtn);
+      container.appendChild(wrap);
+    });
+  } catch (_) {}
+}
+
+async function deleteCase(caseId) {
+  if (!confirm(`"${caseId}" 사건을 삭제하시겠습니까?\n(모든 파일과 세션이 삭제됩니다)`)) return;
+  try {
+    const res = await fetch(`/api/cases/${caseId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error((await res.json()).detail);
+    showToast(`${caseId} 삭제됨`, 'success');
+    // 현재 열려있는 사건이라면 초기화
+    if (state.caseId === caseId) {
+      state.caseId = null;
+      state.session = null;
+      document.getElementById('case-badge').textContent = '사건 미선택';
+      document.getElementById('case-badge').className = '';
+      document.getElementById('landing').style.display = '';
+      document.getElementById('analysis-view').style.display = 'none';
+      document.getElementById('report-view').style.display = 'none';
+      document.getElementById('all-done-banner').style.display = 'none';
+      document.getElementById('rejection-list').innerHTML =
+        '<div style="color:#4a5568; font-size:0.8rem; padding:8px 0;">사건을 선택하면 표시됩니다.</div>';
+    }
+    loadQuickCases();
+  } catch (e) {
+    showToast('삭제 오류: ' + e.message, 'error');
+  }
+}
+
+// ============================================================
+// 사건 시작
+// ============================================================
+async function startCase() {
+  const caseId = document.getElementById('case-input').value.trim();
+  if (!caseId) return showToast('사건번호를 입력하세요.', 'error');
+
+  showToast('OA 파싱 중...', 'info');
+  try {
+    const res = await fetch(`/api/cases/${caseId}/parse`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json();
+      const msg = err.detail || '파싱 오류';
+      // OA 파일 없음 → 업로드 모달 자동 오픈
+      if (res.status === 404 && (msg.includes('oa') || msg.includes('OA') || msg.includes('파일') || msg.includes('디렉토리'))) {
+        showToast('OA 파일이 없습니다. 파일을 먼저 업로드하세요.', 'error');
+        state.caseId = caseId; // 업로드 모달에서 사건번호를 쓸 수 있게 임시 설정
+        openUploadModal(true);
+        return;
+      }
+      return showToast(msg, 'error');
+    }
+    const data = await res.json();
+    state.caseId = caseId;
+    state.session = data.session;
+
+    document.getElementById('case-badge').textContent = caseId;
+    document.getElementById('case-badge').className = 'active';
+    document.getElementById('landing').style.display = 'none';
+    document.getElementById('analysis-view').style.display = 'flex';
+
+    renderRejectionList();
+    showToast(
+      data.is_resumed
+        ? `세션 복원 — ${data.rejection_count}건`
+        : `새 세션 시작 — ${data.rejection_count}건`,
+      'success'
+    );
+
+    // 첫 번째 미완료 거절이유 자동 선택
+    const first = state.session.rejections.find(r => r.status !== 'concluded');
+    if (first) selectRejection(first.id);
+
+    checkAllDone();
+  } catch (e) {
+    showToast('서버 연결 오류: ' + e.message, 'error');
+  }
+}
+
+async function refreshSession() {
+  if (!state.caseId) return;
+  const res = await fetch(`/api/cases/${state.caseId}/status`);
+  if (!res.ok) return;
+  const data = await res.json();
+  state.session = data.session;
+  renderRejectionList();
+  checkAllDone();
+}
+
+// ============================================================
+// 거절이유 렌더링
+// ============================================================
+function renderRejectionList() {
+  const list = document.getElementById('rejection-list');
+  list.innerHTML = '';
+  if (!state.session) return;
+
+  state.session.rejections.forEach(r => {
+    const div = document.createElement('div');
+    div.className = 'rejection-item' + (r.id === state.currentRejectionId ? ' active' : '');
+    div.dataset.rid = r.id;
+    div.onclick = () => selectRejection(r.id);
+
+    const claimsStr = r.claims.length ? `청구항 ${r.claims.join(', ')}` : '';
+    const citStr = r.citations.length ? ` / ${r.citations.join(', ')}` : '';
+
+    const totalSteps = getHandlerSteps(r.type);
+    const pips = Array.from({ length: totalSteps }, (_, i) => {
+      let cls = 'step-pip';
+      if (i + 1 < r.current_step || r.status === 'concluded') cls += ' done';
+      else if (i + 1 === r.current_step && r.status === 'in_progress') cls += ' current';
+      return `<div class="${cls}"></div>`;
+    }).join('');
+
+    div.innerHTML = `
+      <div class="rej-header">
+        <span class="rej-num">#${r.id}</span>
+        <span class="rej-type">${TYPE_LABELS[r.type] || r.type}</span>
+        <div class="status-dot ${r.status}"></div>
+      </div>
+      <div class="rej-claims">${claimsStr}${citStr}</div>
+      <div class="step-progress">${pips}</div>
+    `;
+    list.appendChild(div);
+  });
+}
+
+function getHandlerSteps(type) {
+  if (type === 'prior_art') return 6;
+  if (type === 'clarity' || type === 'unity') return 4;
+  return 4; // default: 동적이지만 최소 4로 표시 (plan 로드 후 서버 응답으로 보정)
+}
+
+// ============================================================
+// 거절이유 선택
+// ============================================================
+async function selectRejection(rid) {
+  state.currentRejectionId = rid;
+  state.hasResult = false;
+  state.currentResult = '';
+
+  document.getElementById('report-view').style.display = 'none';
+  document.getElementById('analysis-view').style.display = 'flex';
+  document.getElementById('landing').style.display = 'none';
+
+  // 사이드바 활성화
+  document.querySelectorAll('.rejection-item').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.rid) === rid);
+  });
+
+  const r = state.session.rejections.find(x => x.id === rid);
+  if (!r) return;
+
+  state.currentStep = Math.max(r.current_step, 1);
+
+  // 헤더 업데이트
+  const claimsStr = r.claims.length ? `청구항 ${r.claims.join(', ')}` : '';
+  const citStr = r.citations.length ? ` | 인용: ${r.citations.join(', ')}` : '';
+  const unityStr = r.type === 'unity'
+    ? ` | 인용발명 ${r.has_citations ? '있음' : '없음'}`
+    : '';
+  document.getElementById('rej-title').textContent =
+    `#${r.id} ${r.subtype || TYPE_LABELS[r.type] || r.type}`;
+  document.getElementById('rej-meta').textContent = claimsStr + citStr + unityStr;
+
+  renderStepTabs(r);
+  await loadStepResult(rid, state.currentStep);
+  updateActionButtons(r);
+}
+
+// ============================================================
+// Step 탭 렌더링
+// ============================================================
+function renderStepTabs(rejection) {
+  const tabs = document.getElementById('step-tabs');
+  tabs.innerHTML = '';
+  const total = getHandlerSteps(rejection.type);
+  const stepNames = getStepNames(rejection.type);
+
+  for (let i = 1; i <= total; i++) {
+    const btn = document.createElement('button');
+    const isDone = i < rejection.current_step || rejection.status === 'concluded';
+    const isCurrent = i === state.currentStep;
+    btn.className = 'step-tab' + (isCurrent ? ' active' : '') + (isDone && !isCurrent ? ' done' : '');
+    btn.textContent = `Step ${i}${stepNames[i] ? ': ' + stepNames[i] : ''}`;
+    btn.dataset.step = i;
+    btn.onclick = () => switchStep(i);
+    tabs.appendChild(btn);
+  }
+
+  const total_steps = getHandlerSteps(rejection.type);
+  document.getElementById('step-indicator').textContent =
+    `Step ${state.currentStep} / ${total_steps}`;
+}
+
+function getStepNames(type) {
+  if (type === 'prior_art') {
+    return { 1: '본원발명', 2: '인용발명', 3: '차이점/진보성', 4: '전략 선택', 5: '청구항 확정', 6: '코멘트 작성' };
+  }
+  if (type === 'clarity') return { 1: '불비 파악', 2: '명세서 분석', 3: '전략', 4: '코멘트 작성' };
+  if (type === 'unity') return { 1: '그룹 분석', 2: 'STF 분석', 3: '전략', 4: '코멘트 작성' };
+  return { 1: 'Step 1', 2: 'Step 2', 3: '전략', 4: '코멘트 작성' };
+}
+
+async function switchStep(step) {
+  state.currentStep = step;
+  const r = state.session.rejections.find(x => x.id === state.currentRejectionId);
+  if (!r) return;
+  renderStepTabs(r);
+  await loadStepResult(state.currentRejectionId, step);
+  updateActionButtons(r);
+}
+
+// ============================================================
+// Step 결과 로드 (저장된 파일에서)
+// ============================================================
+async function loadStepResult(rid, step) {
+  const placeholder = document.getElementById('result-placeholder');
+  const content = document.getElementById('result-content');
+
+  try {
+    const res = await fetch(`/api/cases/${state.caseId}/rejections/${rid}/steps/${step}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.content && data.content !== '(건너뜀)') {
+        state.currentResult = data.content;
+        state.hasResult = true;
+        placeholder.style.display = 'none';
+        content.style.display = 'block';
+        content.innerHTML = marked.parse(data.content);
+        return;
+      }
+    }
+  } catch (_) {}
+
+  // 결과 없음
+  state.currentResult = '';
+  state.hasResult = false;
+  placeholder.style.display = 'block';
+  content.style.display = 'none';
+}
+
+// ============================================================
+// 액션 버튼 상태 업데이트
+// ============================================================
+function updateActionButtons(rejection) {
+  const isConcluded = rejection.status === 'concluded';
+  const totalSteps = getHandlerSteps(rejection.type);
+  // 현재 활성(미승인) 단계: concluded면 STEPS+1, 아니면 current_step (최소 1)
+  const activeStep = isConcluded ? totalSteps + 1 : Math.max(rejection.current_step, 1);
+  // 보고 있는 탭이 활성 단계인가
+  const isActiveStep = state.currentStep === activeStep;
+  // 보고 있는 탭이 이미 승인된 단계인가
+  const isApprovedStep = state.currentStep < activeStep;
+  // 가장 최근에 승인된 단계 (승인취소 가능한 유일한 단계)
+  const lastApprovedStep = activeStep - 1;
+  const isLastApprovedStep = state.currentStep === lastApprovedStep && lastApprovedStep >= 1;
+  const isStreaming = state.isStreaming;
+
+  const btnExec = document.getElementById('btn-execute');
+  const btnApprove = document.getElementById('btn-approve');
+  const btnCancel = document.getElementById('btn-cancel-approval');
+  const btnSkip = document.getElementById('btn-skip');
+  const btnReopen = document.getElementById('btn-reopen');
+  const btnRegen = document.getElementById('btn-regen');
+
+  // 분석 실행: 승인된 단계나 concluded 상태에서는 비활성
+  btnExec.disabled = isStreaming || isApprovedStep || isConcluded;
+
+  // 승인: 활성 단계에서 결과가 있을 때만
+  btnApprove.disabled = isStreaming || !state.hasResult || !isActiveStep;
+
+  // 승인 취소: 가장 최근에 승인된 단계를 보고 있을 때만 표시
+  btnCancel.style.display = isLastApprovedStep ? 'inline-flex' : 'none';
+  btnCancel.disabled = isStreaming;
+
+  // 건너뛰기: 활성 단계에서만
+  btnSkip.disabled = isStreaming || !isActiveStep;
+
+  // 재검토: concluded일 때만 표시
+  btnReopen.style.display = isConcluded ? 'inline-flex' : 'none';
+
+  // 재생성: 활성 단계이고 승인 전(분석 결과 있을 때)에만
+  btnRegen.disabled = isStreaming || isApprovedStep || isConcluded;
+}
+
+// ============================================================
+// Step 실행 (SSE 스트리밍)
+// ============================================================
+async function executeStep(feedback) {
+  if (!state.caseId || !state.currentRejectionId || state.isStreaming) return;
+
+  const r = state.session.rejections.find(x => x.id === state.currentRejectionId);
+  if (!r) return;
+
+  state.isStreaming = true;
+  state.hasResult = false;
+
+  const placeholder = document.getElementById('result-placeholder');
+  const content = document.getElementById('result-content');
+
+  placeholder.style.display = 'none';
+  content.style.display = 'block';
+  content.innerHTML = '';
+  content.className = 'md-content streaming-cursor';
+
+  updateActionButtons(r);
+
+  // 실행 버튼 상태
+  const btnExec = document.getElementById('btn-execute');
+  btnExec.innerHTML = '<span class="spinner"></span> 분석 중...';
+
+  let accumulated = '';
+
+  try {
+    const res = await fetch(
+      `/api/cases/${state.caseId}/rejections/${state.currentRejectionId}/execute`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ step: state.currentStep, feedback: feedback || null }),
+      }
+    );
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || '실행 오류');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const eventData = JSON.parse(line.slice(6));
+
+        if (eventData.type === 'chunk') {
+          accumulated += eventData.text;
+          content.innerHTML = marked.parse(accumulated);
+          // 스크롤 자동 이동
+          const resultArea = content.closest('.result-area');
+          if (resultArea) resultArea.scrollTop = resultArea.scrollHeight;
+        } else if (eventData.type === 'done') {
+          accumulated = eventData.result || accumulated;
+          state.currentResult = accumulated;
+          state.hasResult = true;
+          content.innerHTML = marked.parse(accumulated);
+          content.className = 'md-content';
+        } else if (eventData.type === 'error') {
+          throw new Error(eventData.message);
+        }
+      }
+    }
+
+    // 세션 갱신
+    await refreshSession();
+    const updatedR = state.session.rejections.find(x => x.id === state.currentRejectionId);
+    if (updatedR) {
+      renderStepTabs(updatedR);
+      updateActionButtons(updatedR);
+    }
+    showToast('분석 완료', 'success');
+
+  } catch (e) {
+    content.className = 'md-content';
+    showToast('오류: ' + e.message, 'error');
+  } finally {
+    state.isStreaming = false;
+    btnExec.innerHTML = '▶ 분석 실행';
+    const updatedR = state.session?.rejections.find(x => x.id === state.currentRejectionId);
+    if (updatedR) updateActionButtons(updatedR);
+  }
+}
+
+async function regenStep() {
+  const feedback = document.getElementById('feedback-input').value.trim();
+  document.getElementById('feedback-input').value = '';
+  await executeStep(feedback || null);
+}
+
+// ============================================================
+// 승인
+// ============================================================
+async function approveStep() {
+  if (!state.caseId || !state.currentRejectionId) return;
+
+  try {
+    const res = await fetch(
+      `/api/cases/${state.caseId}/rejections/${state.currentRejectionId}/approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ last_result: state.currentResult }),
+      }
+    );
+    if (!res.ok) throw new Error((await res.json()).detail);
+    const data = await res.json();
+    state.session = data.session;
+
+    renderRejectionList();
+    const r = state.session.rejections.find(x => x.id === state.currentRejectionId);
+
+    if (data.concluded) {
+      showToast(`거절이유 #${state.currentRejectionId} 완료!`, 'success');
+      updateActionButtons(r);
+      checkAllDone();
+    } else {
+      // 다음 step으로
+      state.currentStep = r.current_step;
+      state.hasResult = false;
+      state.currentResult = '';
+      renderStepTabs(r);
+      await loadStepResult(state.currentRejectionId, state.currentStep);
+      updateActionButtons(r);
+      showToast(`Step ${state.currentStep}로 이동`, 'info');
+    }
+  } catch (e) {
+    showToast('오류: ' + e.message, 'error');
+  }
+}
+
+// ============================================================
+// 건너뛰기
+// ============================================================
+async function skipStep() {
+  if (!state.caseId || !state.currentRejectionId) return;
+
+  try {
+    const res = await fetch(
+      `/api/cases/${state.caseId}/rejections/${state.currentRejectionId}/skip`,
+      { method: 'POST' }
+    );
+    if (!res.ok) throw new Error((await res.json()).detail);
+    const data = await res.json();
+    state.session = data.session;
+
+    renderRejectionList();
+    const r = state.session.rejections.find(x => x.id === state.currentRejectionId);
+
+    if (data.concluded) {
+      updateActionButtons(r);
+      checkAllDone();
+    } else {
+      state.currentStep = r.current_step;
+      state.hasResult = false;
+      state.currentResult = '';
+      renderStepTabs(r);
+      await loadStepResult(state.currentRejectionId, state.currentStep);
+      updateActionButtons(r);
+    }
+    showToast('건너뜀', 'info');
+  } catch (e) {
+    showToast('오류: ' + e.message, 'error');
+  }
+}
+
+// ============================================================
+// 재검토
+// ============================================================
+async function reopenRejection() {
+  if (!state.caseId || !state.currentRejectionId) return;
+
+  try {
+    const res = await fetch(
+      `/api/cases/${state.caseId}/rejections/${state.currentRejectionId}/reopen`,
+      { method: 'POST' }
+    );
+    if (!res.ok) throw new Error((await res.json()).detail);
+    const data = await res.json();
+    state.session = data.session;
+
+    renderRejectionList();
+    const r = state.session.rejections.find(x => x.id === state.currentRejectionId);
+    state.currentStep = 1;
+    state.hasResult = false;
+    state.currentResult = '';
+    renderStepTabs(r);
+    await loadStepResult(state.currentRejectionId, state.currentStep);
+    updateActionButtons(r);
+
+    document.getElementById('all-done-banner').style.display = 'none';
+    showToast(`거절이유 #${state.currentRejectionId} 재검토 시작`, 'info');
+  } catch (e) {
+    showToast('오류: ' + e.message, 'error');
+  }
+}
+
+// ============================================================
+// 승인 취소 (이전 단계로 복귀)
+// ============================================================
+async function cancelApproval() {
+  if (!state.caseId || !state.currentRejectionId) return;
+
+  try {
+    const res = await fetch(
+      `/api/cases/${state.caseId}/rejections/${state.currentRejectionId}/cancel-approval`,
+      { method: 'POST' }
+    );
+    if (!res.ok) throw new Error((await res.json()).detail);
+    const data = await res.json();
+    state.session = data.session;
+
+    const r = state.session.rejections.find(x => x.id === state.currentRejectionId);
+    // 취소된 단계(이제 다시 활성 단계)로 이동
+    state.currentStep = Math.max(r.current_step, 1);
+    state.hasResult = false;
+    state.currentResult = '';
+
+    renderRejectionList();
+    renderStepTabs(r);
+    // 취소된 단계의 기존 결과가 남아있으면 로드 (없으면 placeholder)
+    await loadStepResult(state.currentRejectionId, state.currentStep);
+    updateActionButtons(r);
+
+    document.getElementById('all-done-banner').style.display = 'none';
+    showToast(`Step ${state.currentStep} 승인 취소 — 재분석 가능`, 'info');
+  } catch (e) {
+    showToast('오류: ' + e.message, 'error');
+  }
+}
+
+// ============================================================
+// 모든 거절이유 완료 확인
+// ============================================================
+function checkAllDone() {
+  if (!state.session) return;
+  const allDone = state.session.rejections.every(r => r.status === 'concluded');
+  const banner = document.getElementById('all-done-banner');
+  banner.style.display = allDone ? 'flex' : 'none';
+}
+
+// ============================================================
+// 리포트 초안 뷰
+// ============================================================
+function openReportView() {
+  document.getElementById('landing').style.display = 'none';
+  document.getElementById('analysis-view').style.display = 'none';
+  document.getElementById('report-view').style.display = 'flex';
+
+  // 기존 초안이 있으면 로드
+  if (state.caseId) {
+    fetch(`/api/cases/${state.caseId}/report/draft`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && data.draft) {
+          showDraftContent(data.draft);
+          document.getElementById('report-status').textContent = '초안 있음';
+          document.getElementById('btn-finalize').disabled = false;
+          document.getElementById('btn-redraft').disabled = false;
+        }
+      });
+  }
+}
+
+function closeReportView() {
+  document.getElementById('report-view').style.display = 'none';
+  document.getElementById('analysis-view').style.display = 'flex';
+}
+
+function showDraftContent(markdown) {
+  const placeholder = document.getElementById('report-placeholder');
+  const content = document.getElementById('report-content');
+  placeholder.style.display = 'none';
+  content.style.display = 'block';
+  content.className = 'md-content';
+  content.innerHTML = marked.parse(markdown);
+  state.hasDraft = true;
+}
+
+// ============================================================
+// 초안 생성 (SSE 스트리밍)
+// ============================================================
+async function generateDraft(feedback) {
+  if (!state.caseId || state.isStreaming) return;
+  state.isStreaming = true;
+
+  const placeholder = document.getElementById('report-placeholder');
+  const content = document.getElementById('report-content');
+  const btnDraft = document.getElementById('btn-draft');
+  const btnFinalize = document.getElementById('btn-finalize');
+  const btnRedraft = document.getElementById('btn-redraft');
+  const statusEl = document.getElementById('report-status');
+
+  placeholder.style.display = 'none';
+  content.style.display = 'block';
+  content.innerHTML = '';
+  content.className = 'md-content streaming-cursor';
+  btnDraft.innerHTML = '<span class="spinner"></span> 초안 작성 중...';
+  btnDraft.disabled = true;
+  btnFinalize.disabled = true;
+  btnRedraft.disabled = true;
+  statusEl.textContent = '생성 중...';
+
+  let accumulated = '';
+
+  try {
+    const res = await fetch(`/api/cases/${state.caseId}/report/draft`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedback: feedback || null }),
+    });
+
+    if (!res.ok) throw new Error((await res.json()).detail);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const ev = JSON.parse(line.slice(6));
+
+        if (ev.type === 'chunk') {
+          accumulated += ev.text;
+          content.innerHTML = marked.parse(accumulated);
+          const area = content.closest('.report-result-area');
+          if (area) area.scrollTop = area.scrollHeight;
+        } else if (ev.type === 'done') {
+          accumulated = ev.draft || accumulated;
+          showDraftContent(accumulated);
+          statusEl.textContent = '초안 완성';
+          btnFinalize.disabled = false;
+          btnRedraft.disabled = false;
+          showToast('초안 작성 완료! 검토 후 수정하거나 최종 확정하세요.', 'success');
+        } else if (ev.type === 'error') {
+          throw new Error(ev.message);
+        }
+      }
+    }
+  } catch (e) {
+    content.className = 'md-content';
+    statusEl.textContent = '오류 발생';
+    showToast('초안 생성 오류: ' + e.message, 'error');
+  } finally {
+    state.isStreaming = false;
+    btnDraft.innerHTML = '✦ 초안 작성';
+    btnDraft.disabled = false;
+  }
+}
+
+async function redraft() {
+  const feedback = document.getElementById('report-feedback').value.trim();
+  document.getElementById('report-feedback').value = '';
+  await generateDraft(feedback || null);
+}
+
+// ============================================================
+// 최종 확정 → docx 생성
+// ============================================================
+async function finalizeReport() {
+  if (!state.caseId) return;
+
+  const btn = document.getElementById('btn-finalize');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> docx 생성 중...';
+
+  try {
+    const res = await fetch(`/api/cases/${state.caseId}/report/finalize`, { method: 'POST' });
+    if (!res.ok) throw new Error((await res.json()).detail);
+
+    const link = document.getElementById('download-link');
+    link.href = `/api/cases/${state.caseId}/download`;
+    link.style.display = 'inline-flex';
+    document.getElementById('report-status').textContent = 'docx 완성';
+    showToast('최종 확정 완료! 다운로드 버튼을 누르세요.', 'success');
+  } catch (e) {
+    showToast('최종 확정 실패: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '✓ 최종 확정 (docx 생성)';
+  }
+}
+
+// ============================================================
+// 파일 업로드
+// ============================================================
+async function openUploadModal(afterStart = false) {
+  const caseId = state.caseId || document.getElementById('case-input').value.trim();
+  if (!caseId) {
+    showToast('사건번호를 먼저 입력하세요.', 'error');
+    document.getElementById('case-input').focus();
+    return;
+  }
+  document.getElementById('upload-modal-case').textContent = `사건번호: ${caseId}`;
+  document.getElementById('upload-modal').classList.add('open');
+
+  // 서버에서 기존 업로드 파일 목록 조회
+  try {
+    const res = await fetch(`/api/cases/${caseId}/files`);
+    if (res.ok) {
+      const data = await res.json();
+      _showUploadedFiles(data.files);
+      _resetCitationsList(data.citations);
+    } else {
+      _showUploadedFiles({});
+      _resetCitationsList([]);
+    }
+  } catch (_) {
+    _showUploadedFiles({});
+    _resetCitationsList([]);
+  }
+}
+
+function _showUploadedFiles(files) {
+  // 각 파일 input 위에 이미 업로드된 파일명 표시
+  const map = {
+    'up-oa':     { key: 'oa',        labelId: 'up-oa-status'     },
+    'up-spec':   { key: 'spec',      labelId: 'up-spec-status'   },
+    'up-claims': { key: 'claims_en', labelId: 'up-claims-status' },
+  };
+  for (const [inputId, { key, labelId }] of Object.entries(map)) {
+    let statusEl = document.getElementById(labelId);
+    if (!statusEl) {
+      statusEl = document.createElement('div');
+      statusEl.id = labelId;
+      statusEl.style.cssText = 'font-size:0.75rem; color:#059669; margin-bottom:4px;';
+      const inputEl = document.getElementById(inputId);
+      inputEl.parentNode.insertBefore(statusEl, inputEl);
+    }
+    statusEl.textContent = files[key] ? `✓ 현재: ${files[key]}` : '';
+  }
+}
+
+function _resetCitationsList(existingCitations) {
+  const list = document.getElementById('citations-list');
+  list.innerHTML = '';
+  if (existingCitations && existingCitations.length > 0) {
+    existingCitations.forEach(c => {
+      const row = document.createElement('div');
+      row.className = 'citation-row';
+      row.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:6px;';
+      row.innerHTML = `
+        <input type="text" value="${c.id}"
+          style="width:60px; border:1px solid var(--border); border-radius:6px; padding:5px 7px; font-size:0.82rem;" />
+        <span style="flex:1; font-size:0.8rem; color:#059669;">✓ 현재: ${c.name}</span>
+        <input type="file" accept=".pdf,.txt" style="flex:1; font-size:0.8rem; display:none;" class="cit-new-file" />
+        <button type="button" onclick="toggleCitationReplace(this)"
+          style="background:#e8f0fe; border:none; border-radius:5px; padding:3px 8px; font-size:0.72rem; color:#1a56db; cursor:pointer;">교체</button>
+        <button type="button" onclick="removeCitationRow(this)"
+          style="background:none; border:none; cursor:pointer; color:#9ca3af; font-size:1.1rem; padding:0 2px; line-height:1;" title="삭제">✕</button>
+      `;
+      list.appendChild(row);
+    });
+    addCitationRow(); // 새 인용문헌 추가용 빈 행
+  } else {
+    addCitationRow();
+  }
+}
+
+function addCitationRow() {
+  const list = document.getElementById('citations-list');
+  const newRows = Array.from(list.querySelectorAll('.citation-row')).filter(r => !r.querySelector('.cit-new-file'));
+  const idx = newRows.length + 1;
+  const row = document.createElement('div');
+  row.className = 'citation-row';
+  row.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:6px;';
+  row.innerHTML = `
+    <input type="text" value="D${idx}"
+      style="width:60px; border:1px solid var(--border); border-radius:6px; padding:5px 7px; font-size:0.82rem;" />
+    <input type="file" accept=".pdf,.txt" style="flex:1; font-size:0.8rem;" />
+    <button type="button" onclick="removeCitationRow(this)"
+      style="background:none; border:none; cursor:pointer; color:#9ca3af; font-size:1.1rem; padding:0 2px; line-height:1;" title="삭제">✕</button>
+  `;
+  list.appendChild(row);
+}
+
+function removeCitationRow(btn) {
+  const list = document.getElementById('citations-list');
+  const rows = list.querySelectorAll('.citation-row');
+  if (rows.length <= 1) return; // 마지막 행은 삭제 불가
+  btn.closest('.citation-row').remove();
+}
+
+function toggleCitationReplace(btn) {
+  const row = btn.closest('.citation-row');
+  const fileInput = row.querySelector('.cit-new-file');
+  const statusSpan = row.querySelector('span');
+  if (fileInput.style.display === 'none') {
+    fileInput.style.display = 'block';
+    statusSpan.style.display = 'none';
+    btn.textContent = '취소';
+  } else {
+    fileInput.style.display = 'none';
+    statusSpan.style.display = '';
+    btn.textContent = '교체';
+  }
+}
+
+function closeUploadModal() {
+  document.getElementById('upload-modal').classList.remove('open');
+}
+
+async function uploadFiles() {
+  const caseId = state.caseId || document.getElementById('case-input').value.trim();
+  if (!caseId) return showToast('사건번호가 필요합니다.', 'error');
+
+  const formData = new FormData();
+  const oa = document.getElementById('up-oa').files[0];
+  const spec = document.getElementById('up-spec').files[0];
+  const claims = document.getElementById('up-claims').files[0];
+  if (oa) formData.append('oa', oa);
+  if (spec) formData.append('spec', spec);
+  if (claims) formData.append('claims_en', claims);
+
+  try {
+    if (oa || spec || claims) {
+      const res = await fetch(`/api/cases/${caseId}/upload`, { method: 'POST', body: formData });
+      if (!res.ok) throw new Error((await res.json()).detail);
+    }
+
+    const citRows = document.querySelectorAll('#citations-list .citation-row');
+    let citCount = 0;
+    for (const row of citRows) {
+      const citId = row.querySelector('input[type="text"]').value.trim();
+      // 교체용 숨김 파일 input 또는 일반 파일 input
+      const fileInputs = row.querySelectorAll('input[type="file"]');
+      let citFile = null;
+      for (const fi of fileInputs) {
+        if (fi.files[0]) { citFile = fi.files[0]; break; }
+      }
+      if (citId && citFile) {
+        const citForm = new FormData();
+        citForm.append('citation_id', citId);
+        citForm.append('file', citFile);
+        const res2 = await fetch(`/api/cases/${caseId}/upload-citation`, { method: 'POST', body: citForm });
+        if (!res2.ok) throw new Error((await res2.json()).detail);
+        citCount++;
+      }
+    }
+
+    // 업로드 상태 표시
+    const statusEl = document.getElementById('upload-status');
+    const names = [oa && 'OA', spec && '명세서', claims && '청구항'].filter(Boolean);
+    if (citCount) names.push(`인용문헌 ${citCount}건`);
+    if (names.length) statusEl.textContent = `업로드됨: ${names.join(', ')}`;
+
+    closeUploadModal();
+    showToast('업로드 완료! 이제 "OA 파싱 & 시작" 버튼을 누르세요.', 'success');
+  } catch (e) {
+    showToast('업로드 오류: ' + e.message, 'error');
+  }
+}
+
+// ============================================================
+// Toast
+// ============================================================
+let toastTimer = null;
+function showToast(msg, type = 'info') {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.className = `show ${type}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.className = ''; }, 3500);
+}
+
+// ============================================================
+// 모달 외부 클릭 닫기
+// ============================================================
+document.getElementById('upload-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeUploadModal();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# LLM 설정 — provider와 model만 변경하면 전환 가능
+provider: gemini            # claude / openai / gemini
+model: gemini-2.5-flash
+api_key_env: GOOGLE_API_KEY
+max_tokens: 16000
+
+# 지원 provider별 모델 예시:
+# claude  → claude-sonnet-4-6, claude-haiku-4-5
+# openai  → gpt-4o, gpt-4o-mini
+# gemini  → gemini-2.5-flash, gemini-2.5-pro
