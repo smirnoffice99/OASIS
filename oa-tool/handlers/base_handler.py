@@ -6,7 +6,7 @@ handlers/base_handler.py — 공통 상호작용 루프
 책임:
   - 단계별 LLM 호출 → 터미널 출력 → 사용자 입력 처리 루프
   - 결과 파일 저장 (step_N_result.md, dialogue.json, conclusion.md)
-  - 특수 명령 처리: Y/승인, 건너뛰기, 종료, 재검토 N
+  - 특수 명령 처리: Y/승인, 종료, 재검토 N, 승인취소
 
 사용법:
   서브클래스에서 STEPS와 execute_step()을 구현하고,
@@ -38,7 +38,6 @@ from session import (
 # ---------------------------------------------------------------------------
 
 CMD_APPROVE = ("y", "승인")
-CMD_SKIP = "건너뛰기"
 CMD_EXIT = "종료"
 CMD_REVIEW_PREFIX = "재검토"
 CMD_CANCEL = "승인취소"
@@ -172,7 +171,7 @@ class BaseHandler(ABC):
     def _run_step_loop(self, step: int) -> None:
         """
         단일 step에 대해 [생성 → 출력 → 사용자 입력] 루프를 돈다.
-        승인 시 반환, 건너뛰기 시 빈 결과 저장 후 반환.
+        승인 시 반환, 승인취소 시 StepCancelRequested 발생.
         """
         self._print_separator(minor=True)
         self._print(f"  Step {step} / {self.STEPS} 분석 중...")
@@ -209,16 +208,6 @@ class BaseHandler(ABC):
                     # 결론 저장
                     save_conclusion(
                         self.case_id, self.rejection.id, result, self.cases_root
-                    )
-                    append_dialogue(
-                        self.case_id, self.rejection.id, "user", user_input, self.cases_root
-                    )
-                    self._update_session_step(step + 1)
-                    return
-
-                elif cmd == "skip":
-                    save_conclusion(
-                        self.case_id, self.rejection.id, "(건너뜀)", self.cases_root
                     )
                     append_dialogue(
                         self.case_id, self.rejection.id, "user", user_input, self.cases_root
@@ -264,21 +253,11 @@ class BaseHandler(ABC):
                 cancel_hint = "" if step == 1 else "/'승인취소'"
                 user_input = self._prompt_user(
                     f"\n승인하려면 'Y' 또는 '승인', 수정 요청은 내용 입력, "
-                    f"'건너뛰기'/'종료'/'재검토 N'{cancel_hint}: "
+                    f"'종료'/'재검토 N'{cancel_hint}: "
                 )
                 cmd = self._classify_input(user_input)
 
                 if cmd == "approve":
-                    append_dialogue(
-                        self.case_id, self.rejection.id, "user", user_input, self.cases_root
-                    )
-                    self._update_session_step(step + 1)
-                    return
-
-                elif cmd == "skip":
-                    save_step_result(
-                        self.case_id, self.rejection.id, step, "(건너뜀)", self.cases_root
-                    )
                     append_dialogue(
                         self.case_id, self.rejection.id, "user", user_input, self.cases_root
                     )
@@ -327,15 +306,13 @@ class BaseHandler(ABC):
         사용자 입력을 명령 코드로 분류한다.
 
         Returns:
-            "approve" | "skip" | "exit" | "review" | "cancel" | "feedback"
+            "approve" | "exit" | "review" | "cancel" | "feedback"
         """
         stripped = text.strip()
         lower = stripped.lower()
 
         if lower in CMD_APPROVE:
             return "approve"
-        if stripped == CMD_SKIP:
-            return "skip"
         if stripped == CMD_EXIT:
             return "exit"
         if stripped.startswith(CMD_REVIEW_PREFIX):

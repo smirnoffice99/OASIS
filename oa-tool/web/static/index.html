@@ -290,8 +290,6 @@
     .btn-execute:hover:not(:disabled) { background: var(--primary-dark); }
     .btn-approve { background: #059669; color: #fff; }
     .btn-approve:hover:not(:disabled) { background: #047857; }
-    .btn-skip { background: #f59e0b; color: #fff; }
-    .btn-skip:hover:not(:disabled) { background: #d97706; }
     .btn-reopen { background: #6b7280; color: #fff; }
     .btn-reopen:hover:not(:disabled) { background: #4b5563; }
     .btn-cancel-approval { background: #92400e; color: #fde68a; }
@@ -633,9 +631,6 @@
         </button>
         <button class="btn btn-cancel-approval" id="btn-cancel-approval" onclick="cancelApproval()" style="display:none;">
           ↩ 승인 취소
-        </button>
-        <button class="btn btn-skip" id="btn-skip" onclick="skipStep()" disabled>
-          건너뛰기
         </button>
         <button class="btn btn-reopen" id="btn-reopen" onclick="reopenRejection()" style="display:none;">
           재검토
@@ -1020,7 +1015,7 @@ async function loadStepResult(rid, step) {
     const res = await fetch(`/api/cases/${state.caseId}/rejections/${rid}/steps/${step}`);
     if (res.ok) {
       const data = await res.json();
-      if (data.content && data.content !== '(건너뜀)') {
+      if (data.content) {
         state.currentResult = data.content;
         state.hasResult = true;
         placeholder.style.display = 'none';
@@ -1046,10 +1041,10 @@ function updateActionButtons(rejection) {
   const totalSteps = getHandlerSteps(rejection.type);
   // 현재 활성(미승인) 단계: concluded면 STEPS+1, 아니면 current_step (최소 1)
   const activeStep = isConcluded ? totalSteps + 1 : Math.max(rejection.current_step, 1);
-  // 보고 있는 탭이 활성 단계인가
+  // 보고 있는 탭이 활성 단계인가 (이전 단계가 모두 승인된 상태)
   const isActiveStep = state.currentStep === activeStep;
-  // 보고 있는 탭이 이미 승인된 단계인가
-  const isApprovedStep = state.currentStep < activeStep;
+  // 보고 있는 탭이 이미 승인된 단계인가 (또는 미래 단계)
+  const isNotActiveStep = state.currentStep !== activeStep;
   // 가장 최근에 승인된 단계 (승인취소 가능한 유일한 단계)
   const lastApprovedStep = activeStep - 1;
   const isLastApprovedStep = state.currentStep === lastApprovedStep && lastApprovedStep >= 1;
@@ -1058,12 +1053,11 @@ function updateActionButtons(rejection) {
   const btnExec = document.getElementById('btn-execute');
   const btnApprove = document.getElementById('btn-approve');
   const btnCancel = document.getElementById('btn-cancel-approval');
-  const btnSkip = document.getElementById('btn-skip');
   const btnReopen = document.getElementById('btn-reopen');
   const btnRegen = document.getElementById('btn-regen');
 
-  // 분석 실행: 승인된 단계나 concluded 상태에서는 비활성
-  btnExec.disabled = isStreaming || isApprovedStep || isConcluded;
+  // 분석 실행: 활성 단계(이전 단계 모두 승인)일 때만 활성
+  btnExec.disabled = isStreaming || isNotActiveStep;
 
   // 승인: 활성 단계에서 결과가 있을 때만
   btnApprove.disabled = isStreaming || !state.hasResult || !isActiveStep;
@@ -1072,14 +1066,11 @@ function updateActionButtons(rejection) {
   btnCancel.style.display = isLastApprovedStep ? 'inline-flex' : 'none';
   btnCancel.disabled = isStreaming;
 
-  // 건너뛰기: 활성 단계에서만
-  btnSkip.disabled = isStreaming || !isActiveStep;
-
   // 재검토: concluded일 때만 표시
   btnReopen.style.display = isConcluded ? 'inline-flex' : 'none';
 
-  // 재생성: 활성 단계이고 승인 전(분석 결과 있을 때)에만
-  btnRegen.disabled = isStreaming || isApprovedStep || isConcluded;
+  // 재생성: 활성 단계에서만
+  btnRegen.disabled = isStreaming || isNotActiveStep;
 }
 
 // ============================================================
@@ -1221,41 +1212,6 @@ async function approveStep() {
       updateActionButtons(r);
       showToast(`Step ${state.currentStep}로 이동`, 'info');
     }
-  } catch (e) {
-    showToast('오류: ' + e.message, 'error');
-  }
-}
-
-// ============================================================
-// 건너뛰기
-// ============================================================
-async function skipStep() {
-  if (!state.caseId || !state.currentRejectionId) return;
-
-  try {
-    const res = await fetch(
-      `/api/cases/${state.caseId}/rejections/${state.currentRejectionId}/skip`,
-      { method: 'POST' }
-    );
-    if (!res.ok) throw new Error((await res.json()).detail);
-    const data = await res.json();
-    state.session = data.session;
-
-    renderRejectionList();
-    const r = state.session.rejections.find(x => x.id === state.currentRejectionId);
-
-    if (data.concluded) {
-      updateActionButtons(r);
-      checkAllDone();
-    } else {
-      state.currentStep = r.current_step;
-      state.hasResult = false;
-      state.currentResult = '';
-      renderStepTabs(r);
-      await loadStepResult(state.currentRejectionId, state.currentStep);
-      updateActionButtons(r);
-    }
-    showToast('건너뜀', 'info');
   } catch (e) {
     showToast('오류: ' + e.message, 'error');
   }

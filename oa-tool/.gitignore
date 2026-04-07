@@ -10,9 +10,8 @@ __pycache__/
 *.pyc
 *.pyo
 
-# 생성된 결과물 (선택적으로 제외)
-# cases/*/session.json
-# cases/*/final_comment.docx
+# 사건 데이터 — 보안상 git에 올리지 않음
+cases/
 
 # 벡터 DB (용량 큼)
 samples/vector_db/

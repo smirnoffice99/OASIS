@@ -419,39 +419,6 @@ async def approve_step(case_id: str, rid: int, body: ApproveRequest):
 
 
 # ---------------------------------------------------------------------------
-# 라우트: step 건너뛰기
-# ---------------------------------------------------------------------------
-
-@app.post("/api/cases/{case_id}/rejections/{rid}/skip")
-async def skip_step(case_id: str, rid: int):
-    """현재 step을 건너뛰고 다음 단계로 진행한다."""
-    session = load_session(case_id, CASES_ROOT)
-    rejection = session.get_rejection(rid)
-
-    if rejection is None:
-        raise HTTPException(404, f"거절이유 #{rid}를 찾을 수 없습니다.")
-
-    step = rejection.current_step
-    llm = get_llm()
-    handler = _make_handler(rejection, session, llm, CASES_ROOT)
-    total_steps = handler.STEPS
-    is_last = step == total_steps
-
-    # 건너뜀 표시 저장
-    save_step_result(case_id, rid, step, "(건너뜀)", CASES_ROOT)
-    append_dialogue(case_id, rid, "user", "건너뛰기", CASES_ROOT)
-
-    if is_last:
-        save_conclusion(case_id, rid, "(건너뜀)", CASES_ROOT)
-        session.conclude_rejection(rid)
-    else:
-        session.advance_step(rid, step + 1)
-
-    save_session(session, CASES_ROOT)
-    return {"session": session.to_dict(), "concluded": is_last}
-
-
-# ---------------------------------------------------------------------------
 # 라우트: step 승인 취소
 # ---------------------------------------------------------------------------
 
