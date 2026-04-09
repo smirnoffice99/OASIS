@@ -147,7 +147,17 @@ def _extract_claims(text: str) -> List[int]:
       - "청구항 제1항 내지 제20항, 제31항 내지 제52항" (제N항 형식, 다중 범위)
       - "청구항 제58항, 제67항" (제N항 개별 열거)
       - "청구항 1~5", "청구항 1 내지 5" (숫자만, 구형 호환)
+
+    PDF 추출 보정:
+      - _normalize_pdf_text()가 한글 간 공백을 제거하여 "청구항제1항" 형태가 되므로
+        "청구항" 뒤의 공백을 선택적(\s*)으로 처리한다.
+      - PDF 테이블에서 숫자가 "5 2" 처럼 분리될 수 있어 인접 숫자 간 공백을 먼저 제거한다.
     """
+    # PDF 테이블 추출 시 숫자 사이에 삽입된 공백 제거 ("5 2" → "52")
+    text = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
+    # 한 번으로 충분하지 않을 수 있으므로 재적용 ("1 2 3" → "123")
+    text = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
+
     claims: set[int] = set()
 
     # 전항 체크
@@ -156,8 +166,9 @@ def _extract_claims(text: str) -> List[int]:
 
     # ── 제N항 형식 (현행 한국 특허청 표기) ──────────────────────────────
     # "청구항" 뒤에 오는 "제N항 [내지 제M항] [, 제K항 ...]" 덩어리를 통째로 캡처
+    # \s* 사용: 정규화로 "청구항제1항"처럼 공백이 제거된 경우도 처리
     claim_section_re = re.compile(
-        r"청구항\s+"
+        r"청구항\s*"
         r"((?:제\s*\d+\s*항\s*(?:내지\s*제\s*\d+\s*항)?\s*(?:[,、및]\s*)?)+)"
     )
     for m in claim_section_re.finditer(text):
@@ -243,10 +254,38 @@ def _extract_examiner_opinion(block_text: str) -> str:
 # 텍스트 읽기 (PDF 우선, 없으면 mock .txt)
 # ---------------------------------------------------------------------------
 
-def _read_oa_text(case_dir: Path) -> str:
+def _ocr_page(page, llm_client) -> str:
+    """이미지 기반 PDF 페이지를 LLM Vision으로 텍스트를 추출한다."""
+    if llm_client is None:
+        return ""
+    try:
+        pixmap = page.get_pixmap(dpi=300)
+        return llm_client.ocr_image(pixmap.tobytes("png"))
+    except Exception as e:
+        print(f"[경고] LLM OCR 실패: {e}")
+        return ""
+
+
+def _normalize_pdf_text(text: str) -> str:
+    """
+    PDF 추출 시 한글 음절 사이에 삽입되는 공백을 제거한다.
+    예) "구 체 적 인 거 절 이 유" → "구체적인거절이유"
+    """
+    pattern = re.compile(r'(?<=[\uAC00-\uD7A3]) (?=[\uAC00-\uD7A3])')
+    prev = None
+    while prev != text:
+        prev = text
+        text = pattern.sub('', text)
+    return text
+
+
+def _read_oa_text(case_dir: Path, llm_client=None) -> str:
     """
     case_dir에서 OA 텍스트를 읽어 반환한다.
     우선순위: oa.pdf → oa_mock.txt
+
+    Args:
+        llm_client: 이미지 기반 PDF 페이지 OCR에 사용할 LLMClient (없으면 OCR 건너뜀)
     """
     pdf_path = case_dir / "oa.pdf"
     if pdf_path.exists():
@@ -254,13 +293,26 @@ def _read_oa_text(case_dir: Path) -> str:
             import fitz  # type: ignore  # pymupdf
             doc = fitz.open(str(pdf_path))
             pages = []
+            ocr_applied = False
             for page in doc:
                 # "text" 모드: 레이아웃 보존, 줄바꿈 유지
-                pages.append(page.get_text("text"))
+                text = page.get_text("text")
+                if text.strip():
+                    pages.append(text)
+                else:
+                    pages.append(_ocr_page(page, llm_client))
+                    ocr_applied = True
             doc.close()
-            return "\n".join(pages)
+            if ocr_applied:
+                print("[정보] 이미지 기반 PDF에 LLM OCR을 적용했습니다: oa.pdf")
+            text = _normalize_pdf_text("\n".join(pages))
+            if text.strip():
+                return text
+            print("[경고] PDF에서 텍스트를 추출하지 못했습니다 (이미지 기반 PDF이며 LLM OCR도 실패).")
         except ImportError:
             print("[경고] pymupdf(fitz) 미설치 — oa_mock.txt로 대체합니다.")
+        except Exception as e:
+            print(f"[경고] PDF 읽기 실패: {e} — oa_mock.txt로 대체합니다.")
 
     mock_path = case_dir / "oa_mock.txt"
     if mock_path.exists():
@@ -387,6 +439,9 @@ def _split_rejection_blocks(oa_text: str) -> list[tuple[int, str]]:
                 end = positions[i + 1][1] if i + 1 < len(positions) else len(detail)
                 blocks.append((num, detail[start:end]))
             return blocks
+        # 번호 단락 없음 — 구 형식 OA: 섹션 전체를 거절이유 1번으로 처리
+        if detail.strip():
+            return [(1, detail)]
 
     # ── 전략 2: 폴백 — "거절이유 N" 패턴 ───────────────────────────────
     positions2 = [
@@ -407,12 +462,13 @@ def _split_rejection_blocks(oa_text: str) -> list[tuple[int, str]]:
 # 공개 함수
 # ---------------------------------------------------------------------------
 
-def parse_oa(case_dir: str | Path) -> List[RejectionInfo]:
+def parse_oa(case_dir: str | Path, llm_client=None) -> List[RejectionInfo]:
     """
     OA 파일을 파싱하여 RejectionInfo 리스트를 반환한다.
 
     Args:
-        case_dir: cases/{사건번호}/ 디렉토리 경로
+        case_dir:   cases/{사건번호}/ 디렉토리 경로
+        llm_client: 이미지 기반 PDF OCR에 사용할 LLMClient (없으면 OCR 건너뜀)
 
     Returns:
         List[RejectionInfo]  거절이유 목록 (id 순 정렬)
@@ -421,13 +477,22 @@ def parse_oa(case_dir: str | Path) -> List[RejectionInfo]:
         FileNotFoundError: OA 파일이 없는 경우
     """
     case_dir = Path(case_dir)
-    oa_text = _read_oa_text(case_dir)
+    oa_text = _read_oa_text(case_dir, llm_client)
     blocks = _split_rejection_blocks(oa_text)
 
     if not blocks:
+        # 전체 텍스트를 디버그 파일로 저장
+        debug_path = case_dir / "oa_debug.txt"
+        try:
+            debug_path.write_text(oa_text, encoding="utf-8")
+        except Exception:
+            pass
+        preview = oa_text[:500].replace("\n", " ") if oa_text else "(빈 텍스트)"
         raise ValueError(
             "OA 텍스트에서 거절이유를 찾을 수 없습니다. "
-            "문서 형식을 확인해주세요."
+            "문서 형식을 확인해주세요.\n"
+            f"전체 추출 텍스트가 {debug_path} 에 저장되었습니다.\n"
+            f"[추출된 텍스트 앞부분]: {preview}"
         )
 
     # 요약표에서 청구항 목록 선추출 (상세 블록보다 신뢰도 높음)

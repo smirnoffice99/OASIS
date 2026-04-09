@@ -15,10 +15,24 @@ handlers/prior_art_handler.py — 선행기술 위반 Handler (유형 A)
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
 from handlers.base_handler import BaseHandler
+
+# 특허번호 인식 패턴 (US출원/등록, JP, KR, WO, EP)
+_PATENT_NUM_RE = re.compile(
+    r'\b(?:'
+    r'US\s*\d{4}/\d{6,7}'           # US 출원: US2020/0008185
+    r'|US\s*[\d,]{6,11}\s*[A-Z]\d?' # US 등록: US9,876,543B2
+    r'|JP\s*\d{4}[-–]\d{5,7}'       # JP: JP2019-123456
+    r'|KR\s*10[-–]\d{4}[-–]\d{7}'   # KR: KR10-2019-0012345
+    r'|WO\s*\d{4}/\d{5,6}'          # WO: WO2019/123456
+    r'|EP\s*[\d\s]{6,12}[A-Z]\d?'   # EP: EP3456789A1
+    r')',
+    re.IGNORECASE,
+)
 from llm_client import LLMClient
 from session import Session, RejectionState
 
@@ -128,6 +142,74 @@ class PriorArtHandler(BaseHandler):
         citations_list = ", ".join(self.rejection.citations)
         examiner_opinion = self._get_oa_raw()
 
+        # 인용발명 검사: 불일치 및 내용 미추출(이미지 PDF 등)
+        mismatches: dict[str, tuple[set[str], set[str]]] = {}
+        unreadable: list[str] = []
+        for cit_id in self.rejection.citations:
+            pdf_text = self._get_citation_text(cit_id)
+            if pdf_text and not pdf_text.strip():
+                # 파일은 열렸으나 텍스트 추출 실패 (이미지 기반 PDF 등)
+                unreadable.append(cit_id)
+            else:
+                result = self._check_citation_mismatch(cit_id)
+                if result:
+                    mismatches[cit_id] = result
+
+        # 경고 블록 구성
+        mismatch_block = ""
+        warning_parts = []
+
+        if unreadable:
+            unreadable_list = ", ".join(unreadable)
+            if feedback:
+                warning_parts.append(
+                    f"⚠️ [텍스트 추출 불가 — 사용자 요청에 따라 분석 진행]\n"
+                    f"- {unreadable_list}: 이미지 기반 PDF로 텍스트를 읽을 수 없습니다.\n"
+                    f"사용자가 분석을 요청하였으므로, 심사관 거절이유 원문과 청구항만을 근거로 "
+                    f"추론하여 분석하라. 각 해당 섹션 첫 줄에 "
+                    f"\"⚠️ 파일 내용을 읽을 수 없어 심사관 지적 및 청구항 기반으로 추론하였습니다.\" 를 표시하라."
+                )
+            else:
+                warning_parts.append(
+                    f"⚠️ [인용발명 파일 읽기 실패 — 분석 불가]\n"
+                    f"- {unreadable_list}: 이미지 기반 PDF이거나 텍스트 추출에 실패하여 실제 내용을 확인할 수 없습니다.\n"
+                    f"해당 인용발명 섹션에 아래 메시지를 출력하고 분석은 수행하지 마라:\n"
+                    f"\"⚠️ {unreadable_list} 파일의 텍스트를 읽을 수 없습니다. "
+                    f"파일이 이미지 기반 PDF인지 확인하고, 텍스트 PDF로 교체해 주세요.\""
+                )
+
+        if mismatches:
+            lines = []
+            for cit_id, (oa_nums, pdf_nums) in mismatches.items():
+                lines.append(
+                    f"- {cit_id}: OA 기재 문헌({', '.join(sorted(oa_nums))})과 "
+                    f"첨부 파일({', '.join(sorted(pdf_nums))})이 상이함"
+                )
+            mismatch_summary = "\n".join(lines)
+
+            if feedback:
+                warning_parts.append(
+                    f"⚠️ [인용발명 불일치 확인됨 — 사용자 요청에 따라 분석 진행]\n"
+                    f"{mismatch_summary}\n"
+                    f"불일치에도 불구하고 사용자가 분석을 요청하였으므로, 첨부된 파일 내용을 기준으로 분석하라.\n"
+                    f"각 불일치 인용발명 섹션 첫 줄에 "
+                    f"\"⚠️ 첨부 파일이 OA 기재 문헌과 상이할 수 있습니다.\" 한 줄만 표시하고 분석을 계속하라."
+                )
+            else:
+                first_key = list(mismatches.keys())[0]
+                warning_parts.append(
+                    f"⚠️ [인용발명 불일치 경고 — 분석 전 확인 필요]\n"
+                    f"{mismatch_summary}\n"
+                    f"불일치가 감지된 인용발명에 대해서는:\n"
+                    f"1. 해당 섹션 상단에 불일치를 명확히 보고하라:\n"
+                    f"   \"⚠️ 첨부된 {first_key}({{첨부 파일 번호}})은 OA에 기재된 {{OA 기재 번호}}와 상이합니다. 파일을 확인해 주세요.\"\n"
+                    f"2. 해당 인용발명의 분석은 수행하지 말고, 변리사에게 올바른 파일로 교체할 것을 안내하라.\n"
+                    f"3. 불일치가 없는 인용발명은 아래 지시에 따라 정상 분석하라."
+                )
+
+        if warning_parts:
+            mismatch_block = "\n\n" + "\n\n".join(warning_parts) + "\n"
+
         prompt = f"""[Step 2: 인용발명 분석]
 
 == Step 1 결과 (본원발명 분석 — 대표 독립항 목록 포함) ==
@@ -141,10 +223,10 @@ class PriorArtHandler(BaseHandler):
 
 == 인용문헌 ({citations_list}) ==
 {citations_block}
-
+{mismatch_block}
 위 자료를 바탕으로 각 인용문헌({citations_list})에 대해 다음을 수행하라:
 
-1. 심사관이 지적한 부분 및 Step 1에서 식별한 대표 독립항(들)에 대응되는 부분을 중심으로 해당 인용문헌 발명의 내용을 요약하라.
+1. Step 1에서 식별한 대표 독립항(들)에 대응되는 부분을 중심으로 심사관의 지적을 고려하여 해당 인용문헌 발명의 내용을 요약하라.
 
 2. 인용문헌의 특정 부분을 서술할 때에는 출처(컬럼 번호/단락 번호/페이지)를 명시하라.
    예) "Column 3, Lines 15-40: ..."
@@ -201,7 +283,10 @@ class PriorArtHandler(BaseHandler):
 
 위 자료를 바탕으로 다음을 수행하라:
 
-Step 1에서 식별한 대표 독립항(들) 각각에 대해, 심사관의 신규성/진보성 관련 지적이 타당한지 여부를 검토하라.
+Step 1에서 식별한 대표 독립항(들) 각각에 대해, 심사관의 신규성/진보성 관련 지적이 타당한지 여부만을 검토하라.
+
+- 종속항에 대한 심사관의 신규성/진보성 지적 타당성은 사용자가 별도로 요청할 경우에만 검토하라.
+- 이 단계에서는 영문 코멘트 작성을 위한 전략은 수립하지 않는다.
 
 필요한 경우 아래 관점들을 고려하라:
 - 기능적/효과적 차이점
@@ -514,6 +599,68 @@ Output format: Markdown with ## section headings.
                 except Exception:
                     continue
         return "(샘플 없음)"
+
+    def _extract_patent_numbers(self, text: str) -> set[str]:
+        """텍스트에서 특허번호를 추출한다."""
+        return {m.group() for m in _PATENT_NUM_RE.finditer(text)}
+
+    def _normalize_patent_num(self, num: str) -> str:
+        """비교용 정규화: 공백·쉼표 제거, 대문자화, 끝의 '호'·종류코드(A1/B2 등) 제거."""
+        n = re.sub(r'[\s,]', '', num).upper()
+        n = re.sub(r'호$', '', n)
+        n = re.sub(r'[A-Z]\d?$', '', n)
+        return n
+
+    def _get_oa_expected_numbers(self, cit_id: str) -> set[str]:
+        """
+        OA 텍스트에서 특정 인용문헌(D1, D2 …)과 연관된 특허번호를 추출한다.
+        각 D번호·인용발명N 언급 위치 이후 500자 창에서 탐색한다.
+        """
+        oa_text = self._get_oa_raw()
+        num = cit_id[1:]  # "D1" → "1"
+        patterns = [
+            rf'\bD{num}\b',
+            rf'인용\s*발명\s*{num}',
+            rf'인용\s*문헌\s*{num}',
+        ]
+        found: set[str] = set()
+        for pat in patterns:
+            for m in re.finditer(pat, oa_text):
+                window = oa_text[m.start(): m.start() + 500]
+                found |= self._extract_patent_numbers(window)
+        return found
+
+    def _check_citation_mismatch(
+        self, cit_id: str
+    ) -> tuple[set[str], set[str]] | None:
+        """
+        OA 기재 특허번호와 첨부 PDF의 특허번호를 비교한다.
+        - 불일치(교집합 없음): (oa_nums, pdf_nums) 반환
+        - 일치 또는 판단 불가(번호 미검출): None 반환
+        """
+        pdf_text = self._get_citation_text(cit_id)
+        if not pdf_text:
+            return None  # 파일 없음은 별도 경고로 처리
+
+        oa_nums = self._get_oa_expected_numbers(cit_id)
+        if not oa_nums:
+            return None  # OA에서 번호 미검출 → 판단 보류
+
+        # PDF 앞 3000자(표지·헤더)에서 번호 탐색
+        pdf_nums = self._extract_patent_numbers(pdf_text[:3000])
+        if not pdf_nums:
+            return None  # PDF에서도 번호 미검출 → 판단 보류
+
+        oa_norms = {self._normalize_patent_num(n) for n in oa_nums}
+        pdf_norms = {self._normalize_patent_num(n) for n in pdf_nums}
+
+        # 어느 한쪽이 다른 쪽의 부분 문자열이면 일치로 간주
+        for a in oa_norms:
+            for b in pdf_norms:
+                if a in b or b in a:
+                    return None  # 일치
+
+        return (oa_nums, pdf_nums)
 
     def _build_citations_block(self) -> str:
         """

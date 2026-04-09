@@ -129,9 +129,25 @@ def run_analysis(case_id: str, cases_root: Path, samples_root: Path) -> None:
     # 1. OA 파싱
     # ------------------------------------------------------------------
     print(f"\n[OASIS] 사건번호: {case_id}")
+
+    # ------------------------------------------------------------------
+    # 1. LLM 클라이언트 초기화 (이미지 기반 PDF OCR에도 필요)
+    # ------------------------------------------------------------------
+    print("  LLM 클라이언트 초기화 중...")
+    llm = None
+    try:
+        llm = LLMClient()
+        print(f"  LLM: {llm}")
+    except (ImportError, EnvironmentError) as e:
+        print(f"  [경고] LLM 초기화 실패: {e}")
+        print("  이미지 기반 PDF OCR은 건너뜁니다.")
+
+    # ------------------------------------------------------------------
+    # 2. OA 파싱
+    # ------------------------------------------------------------------
     print("  OA 파일 파싱 중...")
     try:
-        rejections = parse_oa(case_dir)
+        rejections = parse_oa(case_dir, llm_client=llm)
     except FileNotFoundError as e:
         print(f"\n[오류] {e}")
         sys.exit(1)
@@ -140,7 +156,7 @@ def run_analysis(case_id: str, cases_root: Path, samples_root: Path) -> None:
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # 2. 세션 로드 or 신규 생성
+    # 3. 세션 로드 or 신규 생성
     # ------------------------------------------------------------------
     session, is_resumed = get_or_create_session(case_id, rejections, cases_root)
 
@@ -154,21 +170,15 @@ def run_analysis(case_id: str, cases_root: Path, samples_root: Path) -> None:
         print(f"  새 세션 시작 — 거절이유 {len(rejections)}건")
 
     # ------------------------------------------------------------------
-    # 3. 거절이유 목록 확인
+    # 4. 거절이유 목록 확인
     # ------------------------------------------------------------------
     if not _confirm_rejection_list(session):
         print("  분석을 종료합니다.")
         return
 
-    # ------------------------------------------------------------------
-    # 4. LLM 클라이언트 초기화
-    # ------------------------------------------------------------------
-    print("\n  LLM 클라이언트 초기화 중...")
-    try:
-        llm = LLMClient()
-        print(f"  LLM: {llm}")
-    except (ImportError, EnvironmentError) as e:
-        print(f"\n[오류] LLM 초기화 실패: {e}")
+    # LLM 초기화 실패 시 분석 불가
+    if llm is None:
+        print("\n[오류] LLM 클라이언트 초기화에 실패하여 분석을 진행할 수 없습니다.")
         sys.exit(1)
 
     # ------------------------------------------------------------------

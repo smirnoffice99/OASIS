@@ -393,14 +393,50 @@ class BaseHandler(ABC):
                 return self.read_case_file(f"citations/{path.name}")
         return ""
 
-    @staticmethod
-    def _read_pdf(path: Path) -> str:
+    def _read_pdf(self, path: Path) -> str:
         try:
             import fitz  # PyMuPDF
         except ImportError:
             raise ImportError("pymupdf 패키지가 필요합니다: pip install pymupdf")
+
+        # OCR 캐시 파일: {파일명}_ocr.txt (같은 폴더)
+        cache_path = path.parent / f"{path.stem}_ocr.txt"
+        if cache_path.exists():
+            print(f"[정보] OCR 캐시 사용: {cache_path.name}")
+            return cache_path.read_text(encoding="utf-8")
+
         doc = fitz.open(str(path))
-        return "\n".join(page.get_text() for page in doc)
+        total = len(doc)
+        texts = []
+        ocr_applied = False
+        for i, page in enumerate(doc):
+            text = page.get_text()
+            if text.strip():
+                texts.append(text)
+            else:
+                print(f"[OCR] {path.name} 페이지 {i + 1}/{total} 처리 중...", flush=True)
+                texts.append(self._ocr_page_with_llm(page, path.name))
+                ocr_applied = True
+        doc.close()
+
+        result = "\n".join(texts)
+        if ocr_applied:
+            print(f"[정보] {path.name} OCR 완료. 캐시 저장: {cache_path.name}")
+            try:
+                cache_path.write_text(result, encoding="utf-8")
+            except Exception as e:
+                print(f"[경고] OCR 캐시 저장 실패: {e}")
+
+        return result
+
+    def _ocr_page_with_llm(self, page, filename: str = "") -> str:
+        """이미지 기반 PDF 페이지를 LLM Vision으로 텍스트 추출한다."""
+        try:
+            pixmap = page.get_pixmap(dpi=150)
+            return self.llm.ocr_image(pixmap.tobytes("png"))
+        except Exception as e:
+            print(f"[경고] LLM OCR 실패 ({filename}): {e}")
+            return ""
 
     @staticmethod
     def _read_docx(path: Path) -> str:

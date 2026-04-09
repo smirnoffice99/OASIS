@@ -1,0 +1,22 @@
+# Web
+fastapi==0.115.12
+uvicorn==0.34.0
+python-multipart==0.0.20
+
+# LLM providers
+anthropic==0.51.0
+openai==1.75.0
+google-generativeai==0.8.5
+
+# Document processing
+pymupdf==1.25.5
+python-docx==1.1.2
+
+# Config & utils
+pyyaml==6.0.2
+python-dotenv==1.1.0
+pydantic==2.11.3
+
+# RAG (optional — only used when sample count >= 20)
+# chromadb and sentence-transformers require C++ Build Tools to compile.
+# Omitted from build; few-shot mode (< 20 samples) works without them.

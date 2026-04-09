@@ -16,6 +16,12 @@ cases/
 # 벡터 DB (용량 큼)
 samples/vector_db/
 
+# 빌드 결과물
+build/
+dist/
+*.spec
+build_log.txt
+
 # IDE
 .vscode/
 .idea/

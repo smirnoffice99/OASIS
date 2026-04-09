@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OASIS — 특허 의견제출통지서 대응 자동화</title>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="/static/marked.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -294,6 +294,8 @@
     .btn-reopen:hover:not(:disabled) { background: #4b5563; }
     .btn-cancel-approval { background: #92400e; color: #fde68a; }
     .btn-cancel-approval:hover:not(:disabled) { background: #b45309; color: #fff; }
+    .btn-stop { background: #dc2626; color: #fff; }
+    .btn-stop:hover:not(:disabled) { background: #b91c1c; }
     .btn-report { background: #7c3aed; color: #fff; }
     .btn-report:hover:not(:disabled) { background: #6d28d9; }
     .btn-download { background: #0891b2; color: #fff; }
@@ -369,6 +371,7 @@
     #toast.success { border-left: 4px solid #059669; }
     #toast.error { border-left: 4px solid var(--danger); }
     #toast.info { border-left: 4px solid var(--primary); }
+    #toast.warning { border-left: 4px solid #d97706; }
 
     /* 로딩 스피너 */
     .spinner {
@@ -483,6 +486,7 @@
 <header>
   <h1>OA<span>SIS</span></h1>
   <div id="case-badge">사건 미선택</div>
+  <button id="btn-shutdown" onclick="shutdownServer()" title="서버 종료" style="margin-left:auto;background:#c0392b;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:13px;">종료</button>
 </header>
 
 <!-- Layout -->
@@ -627,6 +631,9 @@
         <button class="btn btn-execute" id="btn-execute" onclick="executeStep()">
           ▶ 분석 실행
         </button>
+        <button class="btn btn-stop" id="btn-stop" onclick="stopAnalysis()" style="display:none;">
+          ■ 분석 종료
+        </button>
         <button class="btn btn-approve" id="btn-approve" onclick="approveStep()" disabled>
           ✓ 승인
         </button>
@@ -687,9 +694,22 @@
           style="background:none; border:none; cursor:pointer; color:#9ca3af; font-size:1.1rem; padding:0 2px; line-height:1;" title="삭제">✕</button>
       </div>
     </div>
+    <div id="ocr-status-area" style="display:none; margin-top:10px; padding:8px 10px; background:#fffbeb; border:1px solid #fcd34d; border-radius:6px; font-size:0.78rem; color:#92400e;">
+      <div id="ocr-status-text"></div>
+      <div style="margin-top:6px; display:flex; gap:8px;">
+        <button id="btn-ocr-stop" onclick="stopAllOcr()"
+          style="display:none; background:#dc2626; color:#fff; border:none; border-radius:5px; padding:4px 10px; font-size:0.75rem; font-weight:600; cursor:pointer;">
+          ■ OCR 중단
+        </button>
+        <button id="btn-ocr-resume" onclick="resumeAllOcr()"
+          style="display:none; background:var(--primary); color:#fff; border:none; border-radius:5px; padding:4px 10px; font-size:0.75rem; font-weight:600; cursor:pointer;">
+          ▶ OCR 재개
+        </button>
+      </div>
+    </div>
     <div class="modal-actions">
-      <button class="btn-sm btn-muted" onclick="closeUploadModal()">취소</button>
-      <button class="btn-sm btn-primary" onclick="uploadFiles()">업로드</button>
+      <button class="btn-sm btn-muted" id="upload-cancel-btn" onclick="closeUploadModal()">취소</button>
+      <button class="btn-sm btn-primary" id="upload-btn" onclick="uploadFiles()">업로드</button>
     </div>
   </div>
 </div>
@@ -706,6 +726,7 @@ const state = {
   currentResult: '',
   isStreaming: false,
   hasResult: false,
+  abortController: null,
 };
 
 const TYPE_LABELS = {
@@ -895,7 +916,9 @@ function renderRejectionList() {
     div.dataset.rid = r.id;
     div.onclick = () => selectRejection(r.id);
 
-    const claimsStr = r.claims.length ? `청구항 ${r.claims.join(', ')}` : '';
+    const claimsStr = (r.claims.length === 1 && r.claims[0] === -1)
+      ? '청구항 전항'
+      : r.claims.length ? `청구항 ${r.claims.join(', ')}` : '';
     const citStr = r.citations.length ? ` / ${r.citations.join(', ')}` : '';
 
     const totalSteps = getHandlerSteps(r.type);
@@ -948,7 +971,9 @@ async function selectRejection(rid) {
   state.currentStep = Math.max(r.current_step, 1);
 
   // 헤더 업데이트
-  const claimsStr = r.claims.length ? `청구항 ${r.claims.join(', ')}` : '';
+  const claimsStr = (r.claims.length === 1 && r.claims[0] === -1)
+    ? '청구항 전항'
+    : r.claims.length ? `청구항 ${r.claims.join(', ')}` : '';
   const citStr = r.citations.length ? ` | 인용: ${r.citations.join(', ')}` : '';
   const unityStr = r.type === 'unity'
     ? ` | 인용발명 ${r.has_citations ? '있음' : '없음'}`
@@ -989,7 +1014,7 @@ function renderStepTabs(rejection) {
 
 function getStepNames(type) {
   if (type === 'prior_art') {
-    return { 1: '본원발명', 2: '인용발명', 3: '차이점/진보성', 4: '전략 선택', 5: '청구항 확정', 6: '코멘트 작성' };
+    return { 1: '본원발명', 2: '인용발명', 3: '심사관 지적 타당성', 4: '전략 선택', 5: '청구항 확정', 6: '코멘트 작성' };
   }
   if (type === 'clarity') return { 1: '불비 파악', 2: '명세서 분석', 3: '전략', 4: '코멘트 작성' };
   if (type === 'unity') return { 1: '그룹 분석', 2: 'STF 분석', 3: '전략', 4: '코멘트 작성' };
@@ -1052,10 +1077,15 @@ function updateActionButtons(rejection) {
   const isStreaming = state.isStreaming;
 
   const btnExec = document.getElementById('btn-execute');
+  const btnStop = document.getElementById('btn-stop');
   const btnApprove = document.getElementById('btn-approve');
   const btnCancel = document.getElementById('btn-cancel-approval');
   const btnReopen = document.getElementById('btn-reopen');
   const btnRegen = document.getElementById('btn-regen');
+
+  // 분석 실행 ↔ 분석 종료 토글
+  btnExec.style.display = isStreaming ? 'none' : '';
+  btnStop.style.display = isStreaming ? 'inline-flex' : 'none';
 
   // 분석 실행: 활성 단계(이전 단계 모두 승인)일 때만 활성
   btnExec.disabled = isStreaming || isNotActiveStep;
@@ -1085,6 +1115,7 @@ async function executeStep(feedback) {
 
   state.isStreaming = true;
   state.hasResult = false;
+  state.abortController = new AbortController();
 
   const placeholder = document.getElementById('result-placeholder');
   const content = document.getElementById('result-content');
@@ -1096,11 +1127,8 @@ async function executeStep(feedback) {
 
   updateActionButtons(r);
 
-  // 실행 버튼 상태
-  const btnExec = document.getElementById('btn-execute');
-  btnExec.innerHTML = '<span class="spinner"></span> 분석 중...';
-
   let accumulated = '';
+  let aborted = false;
 
   try {
     const res = await fetch(
@@ -1109,6 +1137,7 @@ async function executeStep(feedback) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ step: state.currentStep, feedback: feedback || null }),
+        signal: state.abortController.signal,
       }
     );
 
@@ -1162,12 +1191,31 @@ async function executeStep(feedback) {
 
   } catch (e) {
     content.className = 'md-content';
-    showToast('오류: ' + e.message, 'error');
+    if (e.name === 'AbortError') {
+      aborted = true;
+      // 중단 시점까지 생성된 내용이 있으면 그대로 표시
+      if (accumulated) {
+        content.innerHTML = marked.parse(accumulated);
+        showToast('분석이 중단되었습니다.', 'warning');
+      } else {
+        content.style.display = 'none';
+        placeholder.style.display = '';
+        showToast('분석이 중단되었습니다.', 'warning');
+      }
+    } else {
+      showToast('오류: ' + e.message, 'error');
+    }
   } finally {
     state.isStreaming = false;
-    btnExec.innerHTML = '▶ 분석 실행';
+    state.abortController = null;
     const updatedR = state.session?.rejections.find(x => x.id === state.currentRejectionId);
     if (updatedR) updateActionButtons(updatedR);
+  }
+}
+
+function stopAnalysis() {
+  if (state.abortController) {
+    state.abortController.abort();
   }
 }
 
@@ -1456,12 +1504,33 @@ async function openUploadModal(afterStart = false) {
   document.getElementById('upload-modal').classList.add('open');
 
   // 서버에서 기존 업로드 파일 목록 조회
+  const ocrArea = document.getElementById('ocr-status-area');
+  ocrArea.style.display = 'none';
+  document.getElementById('btn-ocr-stop').style.display = 'none';
+  document.getElementById('btn-ocr-resume').style.display = 'none';
+
   try {
     const res = await fetch(`/api/cases/${caseId}/files`);
     if (res.ok) {
       const data = await res.json();
       _showUploadedFiles(data.files);
       _resetCitationsList(data.citations);
+
+      // 중단된 OCR이 있으면 재개 버튼 표시
+      const cancelledCits = [];
+      for (const c of (data.citations || [])) {
+        try {
+          const r = await fetch(`/api/cases/${caseId}/citations/${c.id}/ocr-status`);
+          const d = await r.json();
+          if (d.status === 'cancelled') cancelledCits.push(c.id);
+        } catch (_) {}
+      }
+      if (cancelledCits.length > 0) {
+        _ocrActiveCaseId = caseId;
+        _ocrActiveCitIds = cancelledCits;
+        ocrArea.style.display = 'block';
+        await _showOcrCancelledStatus(caseId, cancelledCits);
+      }
     } else {
       _showUploadedFiles({});
       _resetCitationsList([]);
@@ -1565,6 +1634,13 @@ async function uploadFiles() {
   const caseId = state.caseId || document.getElementById('case-input').value.trim();
   if (!caseId) return showToast('사건번호가 필요합니다.', 'error');
 
+  const uploadBtn = document.getElementById('upload-btn');
+  const cancelBtn = document.getElementById('upload-cancel-btn');
+  const ocrArea  = document.getElementById('ocr-status-area');
+  uploadBtn.disabled = true;
+  uploadBtn.textContent = '업로드 중...';
+  ocrArea.style.display = 'none';
+
   const formData = new FormData();
   const oa = document.getElementById('up-oa').files[0];
   const spec = document.getElementById('up-spec').files[0];
@@ -1581,22 +1657,28 @@ async function uploadFiles() {
 
     const citRows = document.querySelectorAll('#citations-list .citation-row');
     let citCount = 0;
+    const ocrPending = []; // OCR 백그라운드 처리 대기 목록
+
     for (const row of citRows) {
       const citId = row.querySelector('input[type="text"]').value.trim();
-      // 교체용 숨김 파일 input 또는 일반 파일 input
       const fileInputs = row.querySelectorAll('input[type="file"]');
       let citFile = null;
       for (const fi of fileInputs) {
         if (fi.files[0]) { citFile = fi.files[0]; break; }
       }
-      if (citId && citFile) {
-        const citForm = new FormData();
-        citForm.append('citation_id', citId);
-        citForm.append('file', citFile);
-        const res2 = await fetch(`/api/cases/${caseId}/upload-citation`, { method: 'POST', body: citForm });
-        if (!res2.ok) throw new Error((await res2.json()).detail);
-        citCount++;
+      if (!citId || !citFile) continue;
+
+      const citForm = new FormData();
+      citForm.append('citation_id', citId);
+      citForm.append('file', citFile);
+      const res2 = await fetch(`/api/cases/${caseId}/upload-citation`, { method: 'POST', body: citForm });
+      if (!res2.ok) {
+        const err = await res2.json();
+        throw new Error(err.detail || '인용문헌 업로드 실패');
       }
+      const data2 = await res2.json();
+      citCount++;
+      if (data2.ocr_started) ocrPending.push(citId);
     }
 
     // 업로드 상태 표시
@@ -1605,11 +1687,191 @@ async function uploadFiles() {
     if (citCount) names.push(`인용문헌 ${citCount}건`);
     if (names.length) statusEl.textContent = `업로드됨: ${names.join(', ')}`;
 
+    // OCR 백그라운드 처리 폴링
+    if (ocrPending.length > 0) {
+      uploadBtn.textContent = 'OCR 처리 중...';
+      ocrArea.style.display = 'block';
+
+      const result = await _pollOcrUntilDone(caseId, ocrPending);
+
+      if (result === 'cancelled') {
+        // 중단된 경우: 모달을 닫지 않고 재개 버튼 표시 상태 유지
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = '업로드';
+        return;
+      }
+
+      cancelBtn.disabled = false;
+      _setOcrStatusDone(ocrArea);
+      await new Promise(r => setTimeout(r, 1200));
+    }
+
     closeUploadModal();
+    ocrArea.style.display = 'none';
     showToast('업로드 완료! 이제 "OA 파싱 & 시작" 버튼을 누르세요.', 'success');
   } catch (e) {
     showToast('업로드 오류: ' + e.message, 'error');
+  } finally {
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = '업로드';
   }
+}
+
+// ── OCR 상태 관리 ─────────────────────────────────────────
+let _ocrActiveCaseId = null;
+let _ocrActiveCitIds = [];
+let _ocrStopSignal = { aborted: false };
+
+// 폴링: 'done' 또는 'cancelled' 반환
+async function _pollOcrUntilDone(caseId, citIds) {
+  _ocrActiveCaseId = caseId;
+  _ocrActiveCitIds = [...citIds];
+  _ocrStopSignal = { aborted: false };
+
+  const statusText = document.getElementById('ocr-status-text');
+  const stopBtn = document.getElementById('btn-ocr-stop');
+  const resumeBtn = document.getElementById('btn-ocr-resume');
+  const cancelBtn = document.getElementById('upload-cancel-btn');
+
+  stopBtn.disabled = false;
+  stopBtn.textContent = '■ OCR 중단';
+  stopBtn.style.display = 'inline-block';
+  resumeBtn.style.display = 'none';
+  cancelBtn.disabled = true;
+
+  const pending = new Set(citIds);
+  const progress = {};
+  citIds.forEach(id => { progress[id] = '대기 중'; });
+
+  while (pending.size > 0 && !_ocrStopSignal.aborted) {
+    for (const citId of [...pending]) {
+      try {
+        const res = await fetch(`/api/cases/${caseId}/citations/${citId}/ocr-status`);
+        const data = await res.json();
+        if (data.status === 'done' || data.status === 'not_started') {
+          pending.delete(citId);
+          progress[citId] = '완료';
+        } else if (data.status === 'processing') {
+          progress[citId] = `${data.progress || '처리 중'} 페이지`;
+        } else if (data.status === 'cancelled') {
+          // 외부에서 취소된 경우
+          _ocrStopSignal.aborted = true;
+          progress[citId] = `${data.done_pages}/${data.total_pages} 페이지 완료 후 중단`;
+          break;
+        }
+      } catch (_) {}
+    }
+
+    const lines = citIds.map(id =>
+      pending.has(id)
+        ? `⏳ ${id}: ${progress[id]}`
+        : `✅ ${id}: ${progress[id]}`
+    );
+    statusText.innerHTML = '인용문헌 OCR 처리 중 (잠시 기다려 주세요)<br>' + lines.join('&nbsp;&nbsp;');
+
+    if (pending.size > 0 && !_ocrStopSignal.aborted)
+      await new Promise(r => setTimeout(r, 2000));
+  }
+
+  stopBtn.style.display = 'none';
+  cancelBtn.disabled = false;
+
+  if (_ocrStopSignal.aborted) {
+    _showOcrCancelledStatus(caseId, citIds);
+    return 'cancelled';
+  }
+  return 'done';
+}
+
+async function stopAllOcr() {
+  _ocrStopSignal.aborted = true;
+  const stopBtn = document.getElementById('btn-ocr-stop');
+  stopBtn.disabled = true;
+  stopBtn.textContent = '중단 중...';
+
+  for (const citId of _ocrActiveCitIds) {
+    try {
+      await fetch(`/api/cases/${_ocrActiveCaseId}/citations/${citId}/cancel-ocr`, { method: 'POST' });
+    } catch (_) {}
+  }
+}
+
+async function resumeAllOcr() {
+  const resumeBtn = document.getElementById('btn-ocr-resume');
+  const stopBtn = document.getElementById('btn-ocr-stop');
+  const cancelBtn = document.getElementById('upload-cancel-btn');
+  const ocrArea = document.getElementById('ocr-status-area');
+
+  resumeBtn.disabled = true;
+  resumeBtn.textContent = '재개 중...';
+
+  const toResume = [];
+  for (const citId of _ocrActiveCitIds) {
+    try {
+      const res = await fetch(
+        `/api/cases/${_ocrActiveCaseId}/citations/${citId}/resume-ocr`,
+        { method: 'POST' }
+      );
+      if (res.ok) toResume.push(citId);
+    } catch (_) {}
+  }
+
+  resumeBtn.style.display = 'none';
+  resumeBtn.disabled = false;
+  resumeBtn.textContent = '▶ OCR 재개';
+
+  if (toResume.length === 0) {
+    showToast('재개할 OCR이 없습니다.', 'warning');
+    return;
+  }
+
+  ocrArea.style.background = '#fffbeb';
+  ocrArea.style.borderColor = '#fcd34d';
+  ocrArea.style.color = '#92400e';
+
+  const result = await _pollOcrUntilDone(_ocrActiveCaseId, toResume);
+  if (result === 'done') {
+    _setOcrStatusDone(ocrArea);
+    await new Promise(r => setTimeout(r, 1200));
+    closeUploadModal();
+    ocrArea.style.display = 'none';
+    showToast('OCR 완료! 이제 "OA 파싱 & 시작" 버튼을 누르세요.', 'success');
+  }
+}
+
+async function _showOcrCancelledStatus(caseId, citIds) {
+  const ocrArea = document.getElementById('ocr-status-area');
+  const statusText = document.getElementById('ocr-status-text');
+  const resumeBtn = document.getElementById('btn-ocr-resume');
+
+  const lines = [];
+  for (const citId of citIds) {
+    try {
+      const res = await fetch(`/api/cases/${caseId}/citations/${citId}/ocr-status`);
+      const data = await res.json();
+      if (data.status === 'cancelled') {
+        lines.push(`⏸ ${citId}: ${data.done_pages}/${data.total_pages} 페이지 완료 후 중단`);
+      } else if (data.status === 'done') {
+        lines.push(`✅ ${citId}: 완료`);
+      }
+    } catch (_) {
+      lines.push(`⏸ ${citId}: 중단됨`);
+    }
+  }
+
+  ocrArea.style.background = '#fef3c7';
+  ocrArea.style.borderColor = '#f59e0b';
+  ocrArea.style.color = '#78350f';
+  statusText.innerHTML = 'OCR 중단됨<br>' + lines.join('&nbsp;&nbsp;');
+  resumeBtn.style.display = 'inline-block';
+}
+
+function _setOcrStatusDone(ocrArea) {
+  const statusText = document.getElementById('ocr-status-text');
+  statusText.innerHTML = '✅ 모든 인용문헌 OCR 완료';
+  ocrArea.style.background = '#f0fdf4';
+  ocrArea.style.borderColor = '#86efac';
+  ocrArea.style.color = '#166534';
 }
 
 // ============================================================
@@ -1630,6 +1892,17 @@ function showToast(msg, type = 'info') {
 document.getElementById('upload-modal').addEventListener('click', function(e) {
   if (e.target === this) closeUploadModal();
 });
+
+// ============================================================
+// 서버 종료
+// ============================================================
+async function shutdownServer() {
+  if (!confirm('OASIS 서버를 종료하시겠습니까?')) return;
+  try {
+    await fetch('/api/shutdown', { method: 'POST' });
+  } catch(e) {}
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-size:20px;color:#555;">OASIS가 종료되었습니다. 창을 닫아주세요.</div>';
+}
 </script>
 </body>
 </html>

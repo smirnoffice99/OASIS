@@ -18,8 +18,14 @@ from pathlib import Path
 from typing import Optional
 
 # .env 파일의 환경변수를 자동으로 로드 (파일이 없어도 오류 없이 무시)
+import sys as _sys_dotenv
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent / ".env")
+if getattr(_sys_dotenv, "frozen", False):
+    # PyInstaller: .env는 OASIS.exe 옆에 있음
+    _env_path = Path(_sys_dotenv.executable).parent / ".env"
+else:
+    _env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(_env_path)
 
 # oa-tool 모듈 경로를 sys.path에 추가
 _ROOT = Path(__file__).parent.parent
@@ -48,11 +54,21 @@ from llm_client import LLMClient
 
 # ---------------------------------------------------------------------------
 # 경로 설정
+# OASIS_DATA_DIR 환경변수가 있으면 (PyInstaller 빌드 시) 그 경로를 사용한다.
 # ---------------------------------------------------------------------------
 
-CASES_ROOT = _ROOT / "cases"
-SAMPLES_ROOT = _ROOT / "samples"
-STATIC_DIR = Path(__file__).parent / "static"
+import os as _os
+_DATA_DIR = Path(_os.environ["OASIS_DATA_DIR"]) if "OASIS_DATA_DIR" in _os.environ else _ROOT
+
+CASES_ROOT = _DATA_DIR / "cases"
+SAMPLES_ROOT = _DATA_DIR / "samples"
+
+# PyInstaller 번들 환경에서는 sys._MEIPASS(_internal/)를 기준으로 경로를 잡는다
+import sys as _sys
+if getattr(_sys, "frozen", False):
+    STATIC_DIR = Path(_sys._MEIPASS) / "web" / "static"
+else:
+    STATIC_DIR = Path(__file__).parent / "static"
 
 # ---------------------------------------------------------------------------
 # FastAPI 앱 초기화
@@ -67,6 +83,10 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 _llm: Optional[LLMClient] = None
 _llm_lock = threading.Lock()
+
+# OCR 취소 이벤트: "{case_id}/{cit_id}" → threading.Event
+_ocr_cancel_events: dict[str, threading.Event] = {}
+_ocr_cancel_lock = threading.Lock()
 
 
 def get_llm() -> LLMClient:
@@ -183,16 +203,254 @@ async def upload_citation(
     citation_id: str = Form(...),
     file: UploadFile = File(...),
 ):
-    """인용문헌 파일을 업로드한다."""
+    """
+    인용문헌 파일을 업로드한다.
+    PDF이고 이미지 기반인 경우 백그라운드 OCR을 시작한다.
+    이미지 기반 PDF가 100페이지를 초과하면 업로드를 거부한다.
+    """
     citations_dir = CASES_ROOT / case_id / "citations"
     citations_dir.mkdir(parents=True, exist_ok=True)
 
     suffix = Path(file.filename).suffix or ".pdf"
     dest = citations_dir / f"{citation_id}{suffix}"
     content = await file.read()
+
+    # 100페이지 초과 이미지 PDF 사전 차단
+    if suffix.lower() == ".pdf":
+        try:
+            import fitz
+            import io
+            doc = fitz.open(stream=io.BytesIO(content), filetype="pdf")
+            total_pages = len(doc)
+            is_image_based = total_pages > 0 and not any(
+                page.get_text().strip() for page in doc
+            )
+            doc.close()
+            if is_image_based and total_pages > 100:
+                raise HTTPException(
+                    422,
+                    f"{citation_id} 파일은 이미지 기반 PDF {total_pages}페이지입니다. "
+                    "OCR 처리 가능 범위(100페이지 이하)를 초과합니다. "
+                    "페이지 수를 줄이거나 텍스트 기반 PDF로 교체해 주세요."
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # fitz 미설치 등 예외 시 검사 건너뜀
+
     dest.write_bytes(content)
 
-    return {"saved": dest.name}
+    # 실행 중인 OCR이 있으면 취소 신호 전송
+    ocr_key = f"{case_id}/{citation_id}"
+    with _ocr_cancel_lock:
+        ev = _ocr_cancel_events.get(ocr_key)
+        if ev:
+            ev.set()
+
+    # 기존 OCR 캐시·진행·partial 파일 초기화 (파일 교체 시 재OCR)
+    cache_path = citations_dir / f"{citation_id}_ocr.txt"
+    progress_path = citations_dir / f"{citation_id}_ocr_progress.txt"
+    partial_path = citations_dir / f"{citation_id}_ocr_partial.json"
+    cache_path.unlink(missing_ok=True)
+    progress_path.unlink(missing_ok=True)
+    partial_path.unlink(missing_ok=True)
+
+    ocr_started = False
+    if suffix.lower() == ".pdf":
+        cancel_event = threading.Event()
+        with _ocr_cancel_lock:
+            _ocr_cancel_events[ocr_key] = cancel_event
+        thread = threading.Thread(
+            target=_run_citation_ocr,
+            args=(dest, get_llm(), cancel_event, ocr_key),
+            daemon=True,
+        )
+        thread.start()
+        ocr_started = True
+
+    return {"saved": dest.name, "ocr_started": ocr_started}
+
+
+def _run_citation_ocr(
+    pdf_path: Path,
+    llm: LLMClient,
+    cancel_event: threading.Event,
+    ocr_key: str,
+) -> None:
+    """
+    백그라운드에서 이미지 기반 PDF를 OCR하고 캐시 파일에 저장한다.
+    - 페이지마다 partial 파일에 중간 결과를 저장한다.
+    - cancel_event가 set되면 중단하고 partial을 보존한다.
+    - partial이 있으면 해당 페이지부터 재개한다.
+    """
+    import json as _json
+
+    cache_path = pdf_path.parent / f"{pdf_path.stem}_ocr.txt"
+    progress_path = pdf_path.parent / f"{pdf_path.stem}_ocr_progress.txt"
+    partial_path = pdf_path.parent / f"{pdf_path.stem}_ocr_partial.json"
+
+    try:
+        import fitz
+    except ImportError:
+        print("[경고] pymupdf 미설치 — OCR 건너뜀")
+        with _ocr_cancel_lock:
+            _ocr_cancel_events.pop(ocr_key, None)
+        return
+
+    cancelled = False
+    try:
+        doc = fitz.open(str(pdf_path))
+        total = len(doc)
+
+        # 기존 partial 파일로 재개 지점 결정
+        texts: list[str] = []
+        start_page = 0
+        if partial_path.exists():
+            try:
+                partial = _json.loads(partial_path.read_text(encoding="utf-8"))
+                if partial.get("total") == total:
+                    texts = partial.get("texts", [])
+                    start_page = len(texts)
+            except Exception:
+                pass
+
+        # 처음 시작 시에만 텍스트 기반 PDF 검사
+        if start_page == 0:
+            if any(page.get_text().strip() for page in doc):
+                doc.close()
+                return
+
+        progress_path.write_text(f"{start_page}/{total}", encoding="utf-8")
+
+        for i in range(start_page, total):
+            # 취소 신호 확인
+            if cancel_event.is_set():
+                cancelled = True
+                partial_path.write_text(
+                    _json.dumps({"total": total, "texts": texts}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                break
+
+            page = doc[i]
+            progress_path.write_text(f"{i + 1}/{total}", encoding="utf-8")
+            text = page.get_text()
+            if text.strip():
+                texts.append(text)
+            else:
+                try:
+                    pixmap = page.get_pixmap(dpi=150)
+                    texts.append(llm.ocr_image(pixmap.tobytes("png")))
+                except Exception as e:
+                    print(f"[경고] OCR 실패 ({pdf_path.name} p{i + 1}): {e}")
+                    texts.append("")
+
+            # 페이지마다 partial 저장 (취소 시 손실 최소화)
+            partial_path.write_text(
+                _json.dumps({"total": total, "texts": texts}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+        doc.close()
+
+        if not cancelled:
+            cache_path.write_text("\n".join(texts), encoding="utf-8")
+            partial_path.unlink(missing_ok=True)
+            print(f"[정보] OCR 완료: {pdf_path.name}")
+
+    except Exception as e:
+        print(f"[오류] 백그라운드 OCR 실패 ({pdf_path.name}): {e}")
+    finally:
+        with _ocr_cancel_lock:
+            _ocr_cancel_events.pop(ocr_key, None)
+        if cancelled:
+            progress_path.write_text("cancelled", encoding="utf-8")
+        else:
+            progress_path.unlink(missing_ok=True)
+
+
+@app.post("/api/cases/{case_id}/citations/{cit_id}/cancel-ocr")
+async def cancel_ocr(case_id: str, cit_id: str):
+    """실행 중인 OCR에 취소 신호를 보낸다."""
+    ocr_key = f"{case_id}/{cit_id}"
+    with _ocr_cancel_lock:
+        ev = _ocr_cancel_events.get(ocr_key)
+    if ev:
+        ev.set()
+        return {"message": "OCR 중단 요청 전송됨"}
+    raise HTTPException(404, "실행 중인 OCR이 없습니다.")
+
+
+@app.post("/api/cases/{case_id}/citations/{cit_id}/resume-ocr")
+async def resume_ocr(case_id: str, cit_id: str):
+    """중단된 OCR을 partial 파일에서 재개한다."""
+    citations_dir = CASES_ROOT / case_id / "citations"
+    partial_path = citations_dir / f"{cit_id}_ocr_partial.json"
+    pdf_path = citations_dir / f"{cit_id}.pdf"
+
+    if not partial_path.exists():
+        raise HTTPException(404, "중단된 OCR 데이터가 없습니다.")
+    if not pdf_path.exists():
+        raise HTTPException(404, f"{cit_id}.pdf 파일이 없습니다.")
+
+    ocr_key = f"{case_id}/{cit_id}"
+    with _ocr_cancel_lock:
+        if ocr_key in _ocr_cancel_events:
+            raise HTTPException(409, "이미 OCR이 실행 중입니다.")
+        cancel_event = threading.Event()
+        _ocr_cancel_events[ocr_key] = cancel_event
+
+    # progress 파일의 "cancelled" 마커 제거
+    progress_path = citations_dir / f"{cit_id}_ocr_progress.txt"
+    progress_path.unlink(missing_ok=True)
+
+    thread = threading.Thread(
+        target=_run_citation_ocr,
+        args=(pdf_path, get_llm(), cancel_event, ocr_key),
+        daemon=True,
+    )
+    thread.start()
+    return {"message": "OCR 재개됨"}
+
+
+@app.get("/api/cases/{case_id}/citations/{cit_id}/ocr-status")
+async def get_citation_ocr_status(case_id: str, cit_id: str):
+    """인용문헌의 OCR 처리 상태를 반환한다."""
+    import json as _json
+
+    citations_dir = CASES_ROOT / case_id / "citations"
+    cache_path = citations_dir / f"{cit_id}_ocr.txt"
+    progress_path = citations_dir / f"{cit_id}_ocr_progress.txt"
+    partial_path = citations_dir / f"{cit_id}_ocr_partial.json"
+
+    if cache_path.exists():
+        return {"status": "done"}
+
+    if progress_path.exists():
+        progress_text = progress_path.read_text(encoding="utf-8").strip()
+        if progress_text == "cancelled":
+            done_pages, total_pages = 0, 0
+            if partial_path.exists():
+                try:
+                    partial = _json.loads(partial_path.read_text(encoding="utf-8"))
+                    done_pages = len(partial.get("texts", []))
+                    total_pages = partial.get("total", 0)
+                except Exception:
+                    pass
+            return {"status": "cancelled", "done_pages": done_pages, "total_pages": total_pages}
+        return {"status": "processing", "progress": progress_text}
+
+    # progress 파일 없이 partial만 있으면 중단된 상태
+    if partial_path.exists():
+        try:
+            partial = _json.loads(partial_path.read_text(encoding="utf-8"))
+            done_pages = len(partial.get("texts", []))
+            total_pages = partial.get("total", 0)
+            return {"status": "cancelled", "done_pages": done_pages, "total_pages": total_pages}
+        except Exception:
+            pass
+
+    return {"status": "not_started"}
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +465,7 @@ async def parse_case(case_id: str):
         raise HTTPException(404, f"사건 디렉토리가 없습니다: {case_id}")
 
     try:
-        rejections = parse_oa(case_dir)
+        rejections = parse_oa(case_dir, llm_client=get_llm())
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
@@ -349,9 +607,10 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
 
     async def generate():
         import asyncio
-        deadline = 300  # 최대 대기 시간(초)
+        deadline = 1800  # 최대 대기 시간(초) — OCR 포함 최대 30분
         elapsed = 0.0
-        interval = 0.05  # polling 간격(초)
+        interval = 0.05   # polling 간격(초)
+        last_keepalive = 0.0
 
         while elapsed < deadline:
             try:
@@ -359,6 +618,10 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
             except stdlib_queue.Empty:
                 await asyncio.sleep(interval)
                 elapsed += interval
+                # 15초마다 SSE keepalive 전송 (브라우저·프록시 연결 유지)
+                if elapsed - last_keepalive >= 15.0:
+                    yield ": keepalive\n\n"
+                    last_keepalive = elapsed
                 continue
 
             if event_type == "chunk":
@@ -373,7 +636,7 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
                 yield f"data: {json.dumps({'type': 'done', 'result': result, 'step': step, 'total_steps': total_steps})}\n\n"
                 break
         else:
-            yield f"data: {json.dumps({'type': 'error', 'message': '응답 시간 초과 (300초)'})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'message': '응답 시간 초과 (1800초)'})}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -711,3 +974,19 @@ async def delete_case(case_id: str):
         raise HTTPException(404, f"사건이 없습니다: {case_id}")
     shutil.rmtree(case_dir)
     return {"message": f"{case_id} 삭제됨"}
+
+
+# ---------------------------------------------------------------------------
+# 라우트: 서버 종료
+# ---------------------------------------------------------------------------
+
+@app.post("/api/shutdown")
+async def shutdown():
+    """서버 프로세스를 종료한다."""
+    import threading
+    def _stop():
+        import time, os, signal
+        time.sleep(0.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+    threading.Thread(target=_stop, daemon=True).start()
+    return {"message": "서버를 종료합니다."}
