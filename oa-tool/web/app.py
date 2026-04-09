@@ -64,10 +64,16 @@ _DATA_DIR = Path(_os.environ["OASIS_DATA_DIR"]) if "OASIS_DATA_DIR" in _os.envir
 CASES_ROOT = _DATA_DIR / "cases"
 SAMPLES_ROOT = _DATA_DIR / "samples"
 
-# PyInstaller 번들 환경에서는 sys._MEIPASS(_internal/)를 기준으로 경로를 잡는다
+# PyInstaller 번들 환경에서는 sys._MEIPASS(_internal/)를 기준으로 경로를 잡는다.
+# build.bat이 _internal/web/static으로 파일을 복사하지만, 혹시 누락된 경우에도
+# exe 옆에 web/static이 있으면 그 경로를 사용한다(fallback).
 import sys as _sys
 if getattr(_sys, "frozen", False):
-    STATIC_DIR = Path(_sys._MEIPASS) / "web" / "static"
+    _candidates = [
+        Path(_sys._MEIPASS) / "web" / "static",          # 정상 빌드 경로
+        Path(_sys.executable).parent / "web" / "static",  # exe 옆 fallback
+    ]
+    STATIC_DIR = next((p for p in _candidates if p.is_dir()), _candidates[0])
 else:
     STATIC_DIR = Path(__file__).parent / "static"
 

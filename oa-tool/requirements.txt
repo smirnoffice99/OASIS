@@ -17,6 +17,15 @@ pyyaml==6.0.2
 python-dotenv==1.1.0
 pydantic==2.11.3
 
+# Windows OCR (WinRT 직접 바인딩 — powershell subprocess 없이 OCR)
+# Windows 10 1803+ 전용. PyInstaller 빌드 시 --collect-all winrt 필요.
+winrt-runtime
+winrt-Windows.Foundation
+winrt-Windows.Media.Ocr
+winrt-Windows.Graphics.Imaging
+winrt-Windows.Storage.Streams
+winrt-Windows.Globalization
+
 # RAG (optional — only used when sample count >= 20)
 # chromadb and sentence-transformers require C++ Build Tools to compile.
 # Omitted from build; few-shot mode (< 20 samples) works without them.

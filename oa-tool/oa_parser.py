@@ -523,7 +523,86 @@ def parse_oa(case_dir: str | Path, llm_client=None) -> List[RejectionInfo]:
             )
         )
 
-    return sorted(rejections, key=lambda r: r.id)
+    return _merge_prior_art_rejections(sorted(rejections, key=lambda r: r.id))
+
+
+def _merge_prior_art_rejections(rejections: List[RejectionInfo]) -> List[RejectionInfo]:
+    """
+    prior_art 거절이유가 여러 번호로 분리된 경우(예: 1번=신규성, 2번=진보성)
+    하나의 거절이유로 병합한다. id는 첫 번째 항목의 번호를 사용한다.
+    병합 후 나머지 항목들은 id를 순차적으로 재부여한다.
+    """
+    if not rejections:
+        return rejections
+
+    merged: List[RejectionInfo] = []
+    i = 0
+    while i < len(rejections):
+        current = rejections[i]
+        if current.type != "prior_art":
+            merged.append(current)
+            i += 1
+            continue
+
+        # 연속된 prior_art 항목 수집
+        group = [current]
+        j = i + 1
+        while j < len(rejections) and rejections[j].type == "prior_art":
+            group.append(rejections[j])
+            j += 1
+
+        if len(group) == 1:
+            merged.append(current)
+        else:
+            # 청구항·인용문헌 합집합, subtype 병합
+            combined_claims: List[int] = []
+            seen_claims: set = set()
+            combined_citations: List[str] = []
+            seen_citations: set = set()
+            combined_text_parts: List[str] = []
+            combined_opinion_parts: List[str] = []
+            subtypes: List[str] = []
+
+            for r in group:
+                for c in r.claims:
+                    if c not in seen_claims:
+                        seen_claims.add(c)
+                        combined_claims.append(c)
+                for c in r.citations:
+                    if c not in seen_citations:
+                        seen_citations.add(c)
+                        combined_citations.append(c)
+                combined_text_parts.append(r.raw_text)
+                if r.examiner_opinion:
+                    combined_opinion_parts.append(r.examiner_opinion)
+                if r.subtype not in subtypes:
+                    subtypes.append(r.subtype)
+
+            # subtype 결정: 신규성+진보성이 모두 있으면 통합 표기
+            has_nov = any("신규성" in s for s in subtypes)
+            has_inv = any("진보성" in s for s in subtypes)
+            if has_nov and has_inv:
+                merged_subtype = "신규성+진보성"
+            else:
+                merged_subtype = "+".join(subtypes)
+
+            merged.append(RejectionInfo(
+                id=group[0].id,
+                type="prior_art",
+                subtype=merged_subtype,
+                claims=combined_claims,
+                citations=combined_citations,
+                has_citations=False,
+                raw_text="\n\n".join(combined_text_parts),
+                examiner_opinion="\n\n".join(combined_opinion_parts),
+            ))
+        i = j
+
+    # id 순차 재부여 (1부터)
+    for new_id, r in enumerate(merged, start=1):
+        r.id = new_id
+
+    return merged
 
 
 def print_rejection_summary(rejections: List[RejectionInfo]) -> None:

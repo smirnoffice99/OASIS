@@ -151,7 +151,7 @@ samples/vector_db/                          ← chromadb store (auto-created, on
 prompts/{prior_art,clarity,unity,unity_with_citations,default,report}.txt
 ```
 
-**PDF OCR caching**: When a PDF page has no extractable text, `base_handler.py` calls `llm_client.ocr_image()` (LLM Vision). The full result is cached as `{stem}_ocr.txt` next to the PDF so subsequent reads skip the LLM call.
+**PDF OCR**: When a PDF page has no extractable text, `llm_client.ocr_image()` is called. It first tries Windows WinRT OCR via `powershell.exe` (no extra Python bindings needed, works in PyInstaller builds); if that fails or returns empty, it falls back to LLM Vision (Claude/OpenAI/Gemini). The full result is cached as `{stem}_ocr.txt` next to the PDF so subsequent reads skip the call entirely.
 
 ## Final Output Format (`final_comment.docx`)
 

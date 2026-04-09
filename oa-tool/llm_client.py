@@ -12,145 +12,87 @@ from typing import Optional
 import yaml
 
 
-# PowerShell을 통해 Windows WinRT OCR을 호출하는 스크립트.
-# Python winrt 바인딩 대신 powershell.exe를 직접 사용하므로
-# 바인딩 버전 호환 문제가 없고, PyInstaller 번들에도 추가 파일이 불필요하다.
-_WINDOWS_OCR_PS = r"""
-param([string]$ImagePath)
-
-# 출력 인코딩을 UTF-8로 강제 (한국어 텍스트가 깨지지 않도록)
-$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$null = [Windows.Media.Ocr.OcrEngine,                        Windows.Foundation, ContentType=WindowsRuntime]
-$null = [Windows.Globalization.Language,                      Windows.Foundation, ContentType=WindowsRuntime]
-$null = [Windows.Graphics.Imaging.BitmapDecoder,             Windows.Foundation, ContentType=WindowsRuntime]
-$null = [Windows.Storage.Streams.InMemoryRandomAccessStream, Windows.Foundation, ContentType=WindowsRuntime]
-$null = [Windows.Storage.Streams.DataWriter,                 Windows.Foundation, ContentType=WindowsRuntime]
-
-# WinRT IAsyncOperation → .NET Task 변환 헬퍼
-$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
-    Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
-                   $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' } |
-    Select-Object -First 1)
-function Await($task, $type) {
-    $t = $asTaskGeneric.MakeGenericMethod($type).Invoke($null, @($task))
-    $t.Wait(-1) | Out-Null
-    $t.Result
-}
-
-# 이미지 파일 → InMemoryRandomAccessStream
-$bytes  = [System.IO.File]::ReadAllBytes($ImagePath)
-$stream = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
-$writer = [Windows.Storage.Streams.DataWriter]::new($stream)
-$writer.WriteBytes($bytes)
-Await ($writer.StoreAsync()) ([uint32]) | Out-Null
-Await ($writer.FlushAsync()) ([bool])   | Out-Null
-$stream.Seek(0)
-
-# 디코딩 → SoftwareBitmap
-$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-$bitmap  = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-
-# 한국어 → 영어 순으로 인식하여 더 긴 결과 반환
-$best = ""
-foreach ($tag in @("ko", "en-US")) {
-    try {
-        $lang = [Windows.Globalization.Language]::new($tag)
-        if ([Windows.Media.Ocr.OcrEngine]::IsLanguageSupported($lang)) {
-            $eng = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lang)
-            if ($null -ne $eng) {
-                $r = Await ($eng.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-                if ($r.Text.Length -gt $best.Length) { $best = $r.Text }
-            }
-        }
-    } catch {}
-}
-Write-Output $best
-"""
-
-# 세션당 한 번만 생성하는 임시 .ps1 파일 경로
-_PS_SCRIPT_PATH: "str | None" = None
+# WinRT 전용 이벤트 루프 — 항상 실행 중인 데몬 스레드에서 돌아간다.
+# ThreadPoolExecutor 스레드마다 새 루프를 만들면 WinRT 완료 콜백이 전달되지 않아
+# await가 영원히 대기(hang)하는 문제를 피하기 위해 루프를 하나로 유지한다.
+_winrt_loop: "asyncio.AbstractEventLoop | None" = None
+_winrt_loop_lock: "threading.Lock | None" = None
 
 
-def _get_ps_script_path() -> str:
-    """임시 .ps1 파일을 한 번만 생성하고 이후에는 재사용한다."""
-    global _PS_SCRIPT_PATH
-    import atexit
-    import tempfile
+def _get_winrt_loop():
+    """WinRT 전용 asyncio 루프를 반환한다. 최초 호출 시 데몬 스레드와 함께 생성한다."""
+    import asyncio
+    import threading
+    global _winrt_loop, _winrt_loop_lock
 
-    if _PS_SCRIPT_PATH and os.path.exists(_PS_SCRIPT_PATH):
-        return _PS_SCRIPT_PATH
+    if _winrt_loop_lock is None:
+        _winrt_loop_lock = threading.Lock()
 
-    f = tempfile.NamedTemporaryFile(
-        suffix=".ps1", mode="w", delete=False, encoding="utf-8"
-    )
-    f.write(_WINDOWS_OCR_PS)
-    f.close()
-    _PS_SCRIPT_PATH = f.name
-    atexit.register(lambda p=f.name: os.unlink(p) if os.path.exists(p) else None)
-    return _PS_SCRIPT_PATH
+    if _winrt_loop is not None and _winrt_loop.is_running():
+        return _winrt_loop
+
+    with _winrt_loop_lock:
+        if _winrt_loop is not None and _winrt_loop.is_running():
+            return _winrt_loop
+
+        loop = asyncio.new_event_loop()
+
+        def _run_loop():
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        t = threading.Thread(target=_run_loop, daemon=True, name="winrt-ocr-loop")
+        t.start()
+        _winrt_loop = loop
+        return loop
 
 
 def _ocr_image_windows(image_bytes: bytes) -> str:
     """
-    Windows OCR (WinRT)로 PNG 이미지에서 텍스트를 추출한다.
+    Windows WinRT OCR API를 Python 프로세스 내에서 직접 호출하여 텍스트를 추출한다.
 
-    powershell.exe를 subprocess로 호출하므로 Python winrt 패키지가 불필요하고
-    PyInstaller 번들에서도 추가 의존성 없이 동작한다.
-    Windows가 아닌 환경에서는 FileNotFoundError(powershell 없음)가 발생한다.
+    winrt 패키지(pywinrt)를 사용하므로 powershell.exe 자식 프로세스를 전혀 띄우지 않는다.
+    → PyInstaller 번들 DLL이 자식 프로세스 PATH를 오염시키는 0xc0000142 문제가
+      구조적으로 발생하지 않는다.
+
+    WinRT 전용 데몬 루프(run_forever)에 코루틴을 제출하고 결과를 동기적으로 기다린다.
+    루프가 항상 실행 중이므로 WinRT 완료 콜백이 정상적으로 전달된다.
+
+    winrt 패키지가 없거나 Windows가 아니면 ImportError가 발생하며,
+    호출부(ocr_image)에서 LLM Vision fallback으로 넘어간다.
     """
-    import subprocess
-    import tempfile
+    import asyncio
 
-    ps_path = _get_ps_script_path()
+    from winrt.windows.globalization import Language
+    from winrt.windows.graphics.imaging import BitmapDecoder
+    from winrt.windows.media.ocr import OcrEngine
+    from winrt.windows.storage.streams import DataWriter, InMemoryRandomAccessStream
 
-    img_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-    img_file.write(image_bytes)
-    img_file.close()
+    async def _run() -> str:
+        stream = InMemoryRandomAccessStream()
+        writer = DataWriter(stream)
+        writer.write_bytes(image_bytes)
+        await writer.store_async()
+        await writer.flush_async()
+        stream.seek(0)
 
-    try:
-        # -Command 로 먼저 출력 인코딩을 UTF-8로 설정한 뒤 스크립트를 호출한다.
-        # -File 모드는 $OutputEncoding 설정을 무시하므로 -Command 방식을 사용한다.
-        cmd_expr = (
-            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
-            f"& '{ps_path}' '{img_file.name}'"
-        )
-        import sys as _sys
-        creation_flags = subprocess.CREATE_NO_WINDOW if _sys.platform == "win32" else 0
+        decoder = await BitmapDecoder.create_async(stream)
+        bitmap = await decoder.get_software_bitmap_async()
 
-        # PyInstaller 번들 환경에서 _MEIPASS가 PATH 앞에 추가되면
-        # powershell.exe가 번들 DLL을 로드하려다 0xc0000142 오류가 발생한다.
-        # 자식 프로세스에는 _MEIPASS를 제거한 깨끗한 PATH를 전달한다.
-        env = os.environ.copy()
-        if getattr(_sys, "frozen", False) and hasattr(_sys, "_MEIPASS"):
-            meipass = _sys._MEIPASS
-            path_parts = env.get("PATH", "").split(os.pathsep)
-            path_parts = [p for p in path_parts if os.path.normcase(p) != os.path.normcase(meipass)]
-            env["PATH"] = os.pathsep.join(path_parts)
+        best = ""
+        for tag in ["ko", "en-US"]:
+            lang = Language(tag)
+            if OcrEngine.is_language_supported(lang):
+                engine = OcrEngine.try_create_from_language(lang)
+                if engine:
+                    result = await engine.recognize_async(bitmap)
+                    if len(result.text) > len(best):
+                        best = result.text
+        return best
 
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy", "Bypass",
-                "-Command", cmd_expr,
-            ],
-            capture_output=True,
-            timeout=60,
-            creationflags=creation_flags,
-            env=env,
-        )
-        if result.returncode != 0:
-            err = result.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(err)
-        return result.stdout.decode("utf-8", errors="replace").strip()
-    finally:
-        try:
-            os.unlink(img_file.name)
-        except OSError:
-            pass
+    loop = _get_winrt_loop()
+    future = asyncio.run_coroutine_threadsafe(_run(), loop)
+    return future.result(timeout=60)
 
 
 
