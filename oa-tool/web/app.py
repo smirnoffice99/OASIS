@@ -215,21 +215,23 @@ async def upload_citation(
     dest = citations_dir / f"{citation_id}{suffix}"
     content = await file.read()
 
-    # 100페이지 초과 이미지 PDF 사전 차단
+    # 이미지 페이지 수 계산 및 100페이지 초과 차단
+    has_image_pages = False
     if suffix.lower() == ".pdf":
         try:
             import fitz
             import io
             doc = fitz.open(stream=io.BytesIO(content), filetype="pdf")
-            total_pages = len(doc)
-            is_image_based = total_pages > 0 and not any(
-                page.get_text().strip() for page in doc
+            image_page_count = sum(
+                1 for page in doc
+                if not page.get_text().strip() or _page_has_large_image(page)
             )
             doc.close()
-            if is_image_based and total_pages > 100:
+            has_image_pages = image_page_count > 0
+            if image_page_count > 100:
                 raise HTTPException(
                     422,
-                    f"{citation_id} 파일은 이미지 기반 PDF {total_pages}페이지입니다. "
+                    f"{citation_id} 파일에 이미지 페이지가 {image_page_count}페이지 포함되어 있습니다. "
                     "OCR 처리 가능 범위(100페이지 이하)를 초과합니다. "
                     "페이지 수를 줄이거나 텍스트 기반 PDF로 교체해 주세요."
                 )
@@ -255,8 +257,9 @@ async def upload_citation(
     progress_path.unlink(missing_ok=True)
     partial_path.unlink(missing_ok=True)
 
+    # 이미지 페이지가 있는 PDF만 OCR 시작
     ocr_started = False
-    if suffix.lower() == ".pdf":
+    if has_image_pages:
         cancel_event = threading.Event()
         with _ocr_cancel_lock:
             _ocr_cancel_events[ocr_key] = cancel_event
@@ -269,6 +272,25 @@ async def upload_citation(
         ocr_started = True
 
     return {"saved": dest.name, "ocr_started": ocr_started}
+
+
+def _page_has_large_image(page) -> bool:
+    """페이지 면적의 50% 이상을 차지하는 이미지가 있으면 True를 반환한다.
+
+    스캔 PDF에 불량 OCR 텍스트 레이어가 삽입된 경우(get_text()가 비어있지 않지만
+    실제 내용은 이미지)를 감지하기 위해 사용한다.
+    """
+    images = page.get_image_info()
+    if not images:
+        return False
+    page_area = page.rect.width * page.rect.height
+    if page_area <= 0:
+        return False
+    img_area = sum(
+        abs((img["bbox"][2] - img["bbox"][0]) * (img["bbox"][3] - img["bbox"][1]))
+        for img in images
+    )
+    return img_area / page_area > 0.5
 
 
 def _run_citation_ocr(
@@ -314,12 +336,6 @@ def _run_citation_ocr(
             except Exception:
                 pass
 
-        # 처음 시작 시에만 텍스트 기반 PDF 검사
-        if start_page == 0:
-            if any(page.get_text().strip() for page in doc):
-                doc.close()
-                return
-
         progress_path.write_text(f"{start_page}/{total}", encoding="utf-8")
 
         for i in range(start_page, total):
@@ -335,7 +351,7 @@ def _run_citation_ocr(
             page = doc[i]
             progress_path.write_text(f"{i + 1}/{total}", encoding="utf-8")
             text = page.get_text()
-            if text.strip():
+            if text.strip() and not _page_has_large_image(page):
                 texts.append(text)
             else:
                 try:
@@ -424,7 +440,10 @@ async def get_citation_ocr_status(case_id: str, cit_id: str):
     partial_path = citations_dir / f"{cit_id}_ocr_partial.json"
 
     if cache_path.exists():
-        return {"status": "done"}
+        content = cache_path.read_text(encoding="utf-8")
+        if content.strip():
+            return {"status": "done"}
+        return {"status": "failed", "reason": "OCR 결과가 비어 있습니다. LLM 연결 상태를 확인하세요."}
 
     if progress_path.exists():
         progress_text = progress_path.read_text(encoding="utf-8").strip()

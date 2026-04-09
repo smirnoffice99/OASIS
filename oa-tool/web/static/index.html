@@ -1701,6 +1701,14 @@ async function uploadFiles() {
         return;
       }
 
+      if (result === 'failed') {
+        // OCR 실패: 모달을 닫지 않고 오류 표시
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = '업로드';
+        _setOcrStatusFailed(ocrArea);
+        return;
+      }
+
       cancelBtn.disabled = false;
       _setOcrStatusDone(ocrArea);
       await new Promise(r => setTimeout(r, 1200));
@@ -1722,7 +1730,7 @@ let _ocrActiveCaseId = null;
 let _ocrActiveCitIds = [];
 let _ocrStopSignal = { aborted: false };
 
-// 폴링: 'done' 또는 'cancelled' 반환
+// 폴링: 'done', 'failed', 또는 'cancelled' 반환
 async function _pollOcrUntilDone(caseId, citIds) {
   _ocrActiveCaseId = caseId;
   _ocrActiveCitIds = [...citIds];
@@ -1740,6 +1748,7 @@ async function _pollOcrUntilDone(caseId, citIds) {
   cancelBtn.disabled = true;
 
   const pending = new Set(citIds);
+  const failed = new Set();
   const progress = {};
   citIds.forEach(id => { progress[id] = '대기 중'; });
 
@@ -1748,25 +1757,29 @@ async function _pollOcrUntilDone(caseId, citIds) {
       try {
         const res = await fetch(`/api/cases/${caseId}/citations/${citId}/ocr-status`);
         const data = await res.json();
-        if (data.status === 'done' || data.status === 'not_started') {
+        if (data.status === 'done') {
           pending.delete(citId);
           progress[citId] = '완료';
+        } else if (data.status === 'failed') {
+          pending.delete(citId);
+          failed.add(citId);
+          progress[citId] = `실패 (${data.reason || 'OCR 오류'})`;
         } else if (data.status === 'processing') {
           progress[citId] = `${data.progress || '처리 중'} 페이지`;
         } else if (data.status === 'cancelled') {
-          // 외부에서 취소된 경우
           _ocrStopSignal.aborted = true;
           progress[citId] = `${data.done_pages}/${data.total_pages} 페이지 완료 후 중단`;
           break;
         }
+        // not_started: 스레드 시작 직후 일시적 상태 — 계속 폴링
       } catch (_) {}
     }
 
-    const lines = citIds.map(id =>
-      pending.has(id)
-        ? `⏳ ${id}: ${progress[id]}`
-        : `✅ ${id}: ${progress[id]}`
-    );
+    const lines = citIds.map(id => {
+      if (failed.has(id)) return `❌ ${id}: ${progress[id]}`;
+      if (pending.has(id)) return `⏳ ${id}: ${progress[id]}`;
+      return `✅ ${id}: ${progress[id]}`;
+    });
     statusText.innerHTML = '인용문헌 OCR 처리 중 (잠시 기다려 주세요)<br>' + lines.join('&nbsp;&nbsp;');
 
     if (pending.size > 0 && !_ocrStopSignal.aborted)
@@ -1779,6 +1792,19 @@ async function _pollOcrUntilDone(caseId, citIds) {
   if (_ocrStopSignal.aborted) {
     _showOcrCancelledStatus(caseId, citIds);
     return 'cancelled';
+  }
+  if (failed.size > 0) {
+    const lines = citIds.map(id => {
+      if (failed.has(id)) return `❌ ${id}: ${progress[id]}`;
+      return `✅ ${id}: 완료`;
+    });
+    statusText.innerHTML =
+      'OCR 처리에 실패한 인용문헌이 있습니다.<br>' +
+      lines.join('&nbsp;&nbsp;') +
+      '<br><br>' +
+      '조치 방법: config.yaml의 LLM 설정 및 API 키를 확인하거나, ' +
+      '해당 인용문헌을 텍스트 기반 PDF로 교체한 뒤 다시 업로드해 주세요.';
+    return 'failed';
   }
   return 'done';
 }
@@ -1872,6 +1898,12 @@ function _setOcrStatusDone(ocrArea) {
   ocrArea.style.background = '#f0fdf4';
   ocrArea.style.borderColor = '#86efac';
   ocrArea.style.color = '#166534';
+}
+
+function _setOcrStatusFailed(ocrArea) {
+  ocrArea.style.background = '#fef2f2';
+  ocrArea.style.borderColor = '#fca5a5';
+  ocrArea.style.color = '#991b1b';
 }
 
 // ============================================================

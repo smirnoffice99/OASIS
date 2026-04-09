@@ -406,37 +406,35 @@ class BaseHandler(ABC):
             return cache_path.read_text(encoding="utf-8")
 
         doc = fitz.open(str(path))
-        total = len(doc)
         texts = []
-        ocr_applied = False
-        for i, page in enumerate(doc):
+        has_image_page = False
+        for page in doc:
             text = page.get_text()
-            if text.strip():
+            # 이미지가 페이지 면적의 50% 이상이면 이미지 기반으로 판정
+            # (스캔 PDF에 불량 OCR 레이어가 삽입된 경우도 감지)
+            images = page.get_image_info()
+            page_area = page.rect.width * page.rect.height
+            img_area = sum(
+                abs((img["bbox"][2] - img["bbox"][0]) * (img["bbox"][3] - img["bbox"][1]))
+                for img in images
+            ) if images else 0
+            is_image_page = (not text.strip()) or (
+                page_area > 0 and img_area / page_area > 0.5
+            )
+            if not is_image_page:
                 texts.append(text)
             else:
-                print(f"[OCR] {path.name} 페이지 {i + 1}/{total} 처리 중...", flush=True)
-                texts.append(self._ocr_page_with_llm(page, path.name))
-                ocr_applied = True
+                has_image_page = True
+                texts.append("")
         doc.close()
 
-        result = "\n".join(texts)
-        if ocr_applied:
-            print(f"[정보] {path.name} OCR 완료. 캐시 저장: {cache_path.name}")
-            try:
-                cache_path.write_text(result, encoding="utf-8")
-            except Exception as e:
-                print(f"[경고] OCR 캐시 저장 실패: {e}")
+        if has_image_page:
+            print(
+                f"[경고] {path.name}에 이미지 페이지가 있으나 OCR 캐시({cache_path.name})가 없습니다. "
+                "파일 추가 단계에서 먼저 업로드해 주세요."
+            )
 
-        return result
-
-    def _ocr_page_with_llm(self, page, filename: str = "") -> str:
-        """이미지 기반 PDF 페이지를 LLM Vision으로 텍스트 추출한다."""
-        try:
-            pixmap = page.get_pixmap(dpi=150)
-            return self.llm.ocr_image(pixmap.tobytes("png"))
-        except Exception as e:
-            print(f"[경고] LLM OCR 실패 ({filename}): {e}")
-            return ""
+        return "\n".join(texts)
 
     @staticmethod
     def _read_docx(path: Path) -> str:
