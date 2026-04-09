@@ -1516,16 +1516,28 @@ async function openUploadModal(afterStart = false) {
       _showUploadedFiles(data.files);
       _resetCitationsList(data.citations);
 
-      // 중단된 OCR이 있으면 재개 버튼 표시
+      // 처리 중이거나 중단된 OCR이 있으면 각각 중단/재개 버튼 표시
       const cancelledCits = [];
+      const processingCits = [];
       for (const c of (data.citations || [])) {
         try {
           const r = await fetch(`/api/cases/${caseId}/citations/${c.id}/ocr-status`);
           const d = await r.json();
           if (d.status === 'cancelled') cancelledCits.push(c.id);
+          else if (d.status === 'processing') processingCits.push(c.id);
         } catch (_) {}
       }
-      if (cancelledCits.length > 0) {
+      if (processingCits.length > 0) {
+        // OCR 진행 중: 폴링 루프는 이미 실행 중이므로 UI만 복원
+        _ocrActiveCaseId = caseId;
+        _ocrActiveCitIds = [...processingCits, ...cancelledCits];
+        ocrArea.style.display = 'block';
+        document.getElementById('btn-ocr-stop').style.display = '';
+        document.getElementById('btn-ocr-resume').style.display = 'none';
+        document.getElementById('ocr-status-text').innerHTML =
+          '인용문헌 OCR 처리 중 (잠시 기다려 주세요)<br>' +
+          processingCits.map(id => `⏳ ${id}: 처리 중`).join('&nbsp;&nbsp;');
+      } else if (cancelledCits.length > 0) {
         _ocrActiveCaseId = caseId;
         _ocrActiveCitIds = cancelledCits;
         ocrArea.style.display = 'block';

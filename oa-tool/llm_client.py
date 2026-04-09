@@ -118,6 +118,17 @@ def _ocr_image_windows(image_bytes: bytes) -> str:
         )
         import sys as _sys
         creation_flags = subprocess.CREATE_NO_WINDOW if _sys.platform == "win32" else 0
+
+        # PyInstaller 번들 환경에서 _MEIPASS가 PATH 앞에 추가되면
+        # powershell.exe가 번들 DLL을 로드하려다 0xc0000142 오류가 발생한다.
+        # 자식 프로세스에는 _MEIPASS를 제거한 깨끗한 PATH를 전달한다.
+        env = os.environ.copy()
+        if getattr(_sys, "frozen", False) and hasattr(_sys, "_MEIPASS"):
+            meipass = _sys._MEIPASS
+            path_parts = env.get("PATH", "").split(os.pathsep)
+            path_parts = [p for p in path_parts if os.path.normcase(p) != os.path.normcase(meipass)]
+            env["PATH"] = os.pathsep.join(path_parts)
+
         result = subprocess.run(
             [
                 "powershell",
@@ -129,6 +140,7 @@ def _ocr_image_windows(image_bytes: bytes) -> str:
             capture_output=True,
             timeout=60,
             creationflags=creation_flags,
+            env=env,
         )
         if result.returncode != 0:
             err = result.stderr.decode("utf-8", errors="replace").strip()
@@ -139,6 +151,7 @@ def _ocr_image_windows(image_bytes: bytes) -> str:
             os.unlink(img_file.name)
         except OSError:
             pass
+
 
 
 def _bundle_root() -> Path:
@@ -422,7 +435,10 @@ class LLMClient:
             return self._ocr_image_llm(image_bytes)
 
     def _ocr_image_llm(self, image_bytes: bytes) -> str:
-        """LLM Vision으로 OCR (Windows OCR fallback)."""
+        """LLM Vision으로 OCR (Windows OCR fallback).
+
+        한글 텍스트는 획이 가늘어 JPEG 손실 압축에 민감하므로 PNG를 그대로 사용한다.
+        """
         if self.provider == "claude":
             return self._ocr_image_claude(image_bytes)
         elif self.provider == "openai":

@@ -14,6 +14,7 @@ import json
 import queue as stdlib_queue
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -338,41 +339,80 @@ def _run_citation_ocr(
 
         progress_path.write_text(f"{start_page}/{total}", encoding="utf-8")
 
+        # --- Phase 1: 페이지별 텍스트 추출 또는 이미지 렌더링 (fitz 순차, 빠름) ---
+        # fitz 문서 객체는 스레드 안전하지 않으므로 이미지 렌더링은 메인 스레드에서 수행.
+        page_tasks: list[tuple[int, "str | bytes"]] = []
         for i in range(start_page, total):
-            # 취소 신호 확인
             if cancel_event.is_set():
                 cancelled = True
-                partial_path.write_text(
-                    _json.dumps({"total": total, "texts": texts}, ensure_ascii=False),
-                    encoding="utf-8",
-                )
                 break
-
             page = doc[i]
-            progress_path.write_text(f"{i + 1}/{total}", encoding="utf-8")
             text = page.get_text()
             if text.strip() and not _page_has_large_image(page):
-                texts.append(text)
+                page_tasks.append((i, text))
             else:
-                try:
-                    pixmap = page.get_pixmap(dpi=150)
-                    texts.append(llm.ocr_image(pixmap.tobytes("png")))
-                except Exception as e:
-                    print(f"[경고] OCR 실패 ({pdf_path.name} p{i + 1}): {e}")
-                    texts.append("")
+                pixmap = page.get_pixmap(dpi=150)
+                page_tasks.append((i, pixmap.tobytes("png")))
+        doc.close()
 
-            # 페이지마다 partial 저장 (취소 시 손실 최소화)
+        if cancelled:
             partial_path.write_text(
                 _json.dumps({"total": total, "texts": texts}, ensure_ascii=False),
                 encoding="utf-8",
             )
+        else:
+            # --- Phase 2: OCR API 호출 병렬 처리 ---
+            result_lock = threading.Lock()
+            new_results: dict[int, str] = {}
+            completed_count = [0]
 
-        doc.close()
+            def _do_ocr(idx: int, data: "str | bytes") -> tuple[int, str]:
+                if isinstance(data, str):
+                    return idx, data
+                try:
+                    return idx, llm.ocr_image(data)
+                except Exception as exc:
+                    print(f"[경고] OCR 실패 ({pdf_path.name} p{idx + 1}): {exc}")
+                    return idx, ""
 
-        if not cancelled:
-            cache_path.write_text("\n".join(texts), encoding="utf-8")
-            partial_path.unlink(missing_ok=True)
-            print(f"[정보] OCR 완료: {pdf_path.name}")
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_idx = {
+                    executor.submit(_do_ocr, idx, data): idx
+                    for idx, data in page_tasks
+                }
+                for fut in as_completed(future_to_idx):
+                    if cancel_event.is_set():
+                        cancelled = True
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    idx, text = fut.result()
+                    with result_lock:
+                        new_results[idx] = text
+                        completed_count[0] += 1
+                        progress_path.write_text(
+                            f"{start_page + completed_count[0]}/{total}",
+                            encoding="utf-8",
+                        )
+
+            if cancelled:
+                # 연속된 앞부분만 저장해 정확한 재개 지점을 보장
+                contiguous = list(texts)
+                for i in range(start_page, total):
+                    if i in new_results:
+                        contiguous.append(new_results[i])
+                    else:
+                        break
+                partial_path.write_text(
+                    _json.dumps({"total": total, "texts": contiguous}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            else:
+                all_results = dict(enumerate(texts))
+                all_results.update(new_results)
+                final_texts = [all_results.get(i, "") for i in range(total)]
+                cache_path.write_text("\n".join(final_texts), encoding="utf-8")
+                partial_path.unlink(missing_ok=True)
+                print(f"[정보] OCR 완료: {pdf_path.name}")
 
     except Exception as e:
         print(f"[오류] 백그라운드 OCR 실패 ({pdf_path.name}): {e}")

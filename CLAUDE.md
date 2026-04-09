@@ -36,12 +36,26 @@ python sample_manager.py stats
 cd oa-tool
 python test_e2e.py                    # End-to-end (all handlers + report, mocked LLM + input)
 python test_oa_parser.py              # Parser unit tests
-python test_prior_art_handler.py      # Handler unit tests (same pattern for others)
+python test_prior_art_handler.py      # Individual handler unit tests
+python test_clarity_handler.py
+python test_unity_handler.py
+python test_default_handler.py
 python test_report_generator.py
 python test_sample_manager.py
+python test_main.py
 ```
 
 All tests mock LLM calls and `input()` — no API keys needed.
+
+## Building the Executable
+
+```bash
+# Windows — produces dist/OASIS/OASIS.exe
+cd oa-tool
+build.bat
+```
+
+`launcher.py` is the PyInstaller entry point. It starts FastAPI in a background thread, then opens the browser automatically. `oasis.spec` controls the build. RAG dependencies (`chromadb`, `sentence-transformers`) are excluded from the build because they require C++ Build Tools; the tool runs in few-shot mode (< 20 samples) without them.
 
 ## Setup
 
@@ -53,10 +67,11 @@ cp .env.example .env                  # Then fill in API key
 
 ## Tech Stack
 
-- Python 3.11+, PyYAML, PyMuPDF (`fitz`), python-docx
+- Python 3.11+, PyYAML, PyMuPDF (`fitz`), python-docx, python-dotenv
 - Web: FastAPI + uvicorn (static files served from `web/static/`)
 - LLM: `anthropic`, `openai`, `google-generativeai`
-- RAG: `chromadb` + `sentence-transformers`
+- CLI input: `prompt_toolkit` (optional — falls back to `input()` if not installed)
+- RAG: `chromadb` + `sentence-transformers` (optional — not in `requirements.txt`; needs C++ Build Tools)
 
 ## Architecture
 
@@ -111,7 +126,7 @@ Supported models: Claude (`claude-sonnet-4-6`, `claude-haiku-4-5`), OpenAI (`gpt
 
 - **Never advance to the next step without explicit user approval** (`"Y"` or `"승인"`)
 - When the user inputs text (not `Y`/`승인`), regenerate the current step with their feedback
-- Special commands: `"건너뛰기"` (skip step), `"종료"` (save & exit), `"재검토 N"` (reopen rejection N)
+- Special commands: `"종료"` (save & exit), `"재검토 N"` (reopen rejection N), `"승인취소"` (undo previous step's approval and go back)
 - Always cite source (column/paragraph/page) when quoting cited references
 - Use terminology from `claims_en.docx` verbatim in all English output
 - Save every step result to `cases/{case_id}/rejection_{n}/step_{x}_result.md` before printing to terminal
@@ -121,19 +136,22 @@ Supported models: Claude (`claude-sonnet-4-6`, `claude-haiku-4-5`), OpenAI (`gpt
 
 ```
 cases/{case_id}/
-├── oa.pdf, spec.pdf, claims_en.docx   ← required inputs
-├── citations/D1.pdf, D2.pdf, ...      ← conditional
+├── oa.pdf, spec.pdf, claims_en.docx        ← required inputs
+├── citations/D1.pdf, D2.pdf, ...           ← conditional
+├── citations/D1_ocr.txt, ...               ← OCR cache (auto-generated for image PDFs)
 ├── session.json
 ├── rejection_1/
-│   ├── step_1_result.md … step_4_result.md (Type A only has step 4)
+│   ├── step_1_result.md … step_N_result.md
 │   ├── dialogue.json
 │   └── conclusion.md
 └── final_comment.docx
 
 samples/{prior_art,clarity,unity,other}/   ← .docx or .txt style examples
-samples/vector_db/                          ← chromadb store (auto-created)
-prompts/{prior_art,clarity,unity,unity_with_citations,report}.txt
+samples/vector_db/                          ← chromadb store (auto-created, only if RAG deps installed)
+prompts/{prior_art,clarity,unity,unity_with_citations,default,report}.txt
 ```
+
+**PDF OCR caching**: When a PDF page has no extractable text, `base_handler.py` calls `llm_client.ocr_image()` (LLM Vision). The full result is cached as `{stem}_ocr.txt` next to the PDF so subsequent reads skip the LLM call.
 
 ## Final Output Format (`final_comment.docx`)
 
