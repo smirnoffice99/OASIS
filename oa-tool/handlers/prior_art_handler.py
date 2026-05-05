@@ -65,14 +65,7 @@ class PriorArtHandler(BaseHandler):
     # BaseHandler 추상 메서드 구현
     # ------------------------------------------------------------------
 
-    def execute_step(self, step: int, feedback: Optional[str] = None) -> str:
-        """
-        step 번호에 따라 LLM 분석을 수행하고 결과 텍스트를 반환한다.
-
-        Args:
-            step:     1~5
-            feedback: 사용자 피드백 (None이면 최초 생성)
-        """
+    def execute_step(self, step: int, messages: list[dict]) -> str:
         dispatch = {
             1: self._step1_claimed_invention,
             2: self._step2_cited_references,
@@ -84,18 +77,19 @@ class PriorArtHandler(BaseHandler):
         fn = dispatch.get(step)
         if fn is None:
             raise ValueError(f"PriorArtHandler에 존재하지 않는 단계: {step}")
-        return fn(feedback)
+        return fn(messages)
 
     # ------------------------------------------------------------------
     # Step 1 — 본원발명 분석
     # ------------------------------------------------------------------
 
-    def _step1_claimed_invention(self, feedback: Optional[str]) -> str:
-        claims_en = self._get_claims_en()
-        spec = self._get_spec()
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
+    def _step1_claimed_invention(self, messages: list[dict]) -> str:
+        if not messages:
+            claims_en = self._get_claims_en()
+            spec = self._get_spec()
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
 
-        prompt = f"""[Step 1: 본원발명 분석]
+            prompt = f"""[Step 1: 본원발명 분석]
 
 아래는 본원 영문 청구항 전문과 명세서 내용입니다.
 
@@ -129,17 +123,20 @@ class PriorArtHandler(BaseHandler):
 
 출력 형식: 마크다운, 한국어
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 2 — 인용발명 분석
     # ------------------------------------------------------------------
 
-    def _step2_cited_references(self, feedback: Optional[str]) -> str:
+    def _step2_cited_references(self, messages: list[dict]) -> str:
+        if messages:
+            system = self.llm.load_prompt("prior_art")
+            return self.llm.chat_messages(messages, system_prompt=system)
+
         step1_result = self._load_step_result(1)
         claims_en = self._get_claims_en()
         citations_block = self._build_citations_block()
@@ -165,22 +162,13 @@ class PriorArtHandler(BaseHandler):
 
         if unreadable:
             unreadable_list = ", ".join(unreadable)
-            if feedback:
-                warning_parts.append(
-                    f"⚠️ [텍스트 추출 불가 — 사용자 요청에 따라 분석 진행]\n"
-                    f"- {unreadable_list}: 이미지 기반 PDF로 텍스트를 읽을 수 없습니다.\n"
-                    f"사용자가 분석을 요청하였으므로, 심사관 거절이유 원문과 청구항만을 근거로 "
-                    f"추론하여 분석하라. 각 해당 섹션 첫 줄에 "
-                    f"\"⚠️ 파일 내용을 읽을 수 없어 심사관 지적 및 청구항 기반으로 추론하였습니다.\" 를 표시하라."
-                )
-            else:
-                warning_parts.append(
-                    f"⚠️ [인용발명 파일 읽기 실패 — 분석 불가]\n"
-                    f"- {unreadable_list}: 이미지 기반 PDF이거나 텍스트 추출에 실패하여 실제 내용을 확인할 수 없습니다.\n"
-                    f"해당 인용발명 섹션에 아래 메시지를 출력하고 분석은 수행하지 마라:\n"
-                    f"\"⚠️ {unreadable_list} 파일의 텍스트를 읽을 수 없습니다. "
-                    f"파일이 이미지 기반 PDF인지 확인하고, 텍스트 PDF로 교체해 주세요.\""
-                )
+            warning_parts.append(
+                f"⚠️ [인용발명 파일 읽기 실패 — 분석 불가]\n"
+                f"- {unreadable_list}: 이미지 기반 PDF이거나 텍스트 추출에 실패하여 실제 내용을 확인할 수 없습니다.\n"
+                f"해당 인용발명 섹션에 아래 메시지를 출력하고 분석은 수행하지 마라:\n"
+                f"\"⚠️ {unreadable_list} 파일의 텍스트를 읽을 수 없습니다. "
+                f"파일이 이미지 기반 PDF인지 확인하고, 텍스트 PDF로 교체해 주세요.\""
+            )
 
         if mismatches:
             lines = []
@@ -190,26 +178,16 @@ class PriorArtHandler(BaseHandler):
                     f"첨부 파일({', '.join(sorted(pdf_nums))})이 상이함"
                 )
             mismatch_summary = "\n".join(lines)
-
-            if feedback:
-                warning_parts.append(
-                    f"⚠️ [인용발명 불일치 확인됨 — 사용자 요청에 따라 분석 진행]\n"
-                    f"{mismatch_summary}\n"
-                    f"불일치에도 불구하고 사용자가 분석을 요청하였으므로, 첨부된 파일 내용을 기준으로 분석하라.\n"
-                    f"각 불일치 인용발명 섹션 첫 줄에 "
-                    f"\"⚠️ 첨부 파일이 OA 기재 문헌과 상이할 수 있습니다.\" 한 줄만 표시하고 분석을 계속하라."
-                )
-            else:
-                first_key = list(mismatches.keys())[0]
-                warning_parts.append(
-                    f"⚠️ [인용발명 불일치 경고 — 분석 전 확인 필요]\n"
-                    f"{mismatch_summary}\n"
-                    f"불일치가 감지된 인용발명에 대해서는:\n"
-                    f"1. 해당 섹션 상단에 불일치를 명확히 보고하라:\n"
-                    f"   \"⚠️ 첨부된 {first_key}({{첨부 파일 번호}})은 OA에 기재된 {{OA 기재 번호}}와 상이합니다. 파일을 확인해 주세요.\"\n"
-                    f"2. 해당 인용발명의 분석은 수행하지 말고, 변리사에게 올바른 파일로 교체할 것을 안내하라.\n"
-                    f"3. 불일치가 없는 인용발명은 아래 지시에 따라 정상 분석하라."
-                )
+            first_key = list(mismatches.keys())[0]
+            warning_parts.append(
+                f"⚠️ [인용발명 불일치 경고 — 분석 전 확인 필요]\n"
+                f"{mismatch_summary}\n"
+                f"불일치가 감지된 인용발명에 대해서는:\n"
+                f"1. 해당 섹션 상단에 불일치를 명확히 보고하라:\n"
+                f"   \"⚠️ 첨부된 {first_key}({{첨부 파일 번호}})은 OA에 기재된 {{OA 기재 번호}}와 상이합니다. 파일을 확인해 주세요.\"\n"
+                f"2. 해당 인용발명의 분석은 수행하지 말고, 변리사에게 올바른 파일로 교체할 것을 안내하라.\n"
+                f"3. 불일치가 없는 인용발명은 아래 지시에 따라 정상 분석하라."
+            )
 
         if warning_parts:
             mismatch_block = "\n\n" + "\n\n".join(warning_parts) + "\n"
@@ -238,31 +216,31 @@ class PriorArtHandler(BaseHandler):
 
 출력 형식: 마크다운, 인용문헌별 섹션으로 구분
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+        messages = [{"role": "user", "content": prompt}]
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 3 — 심사관 지적 타당성 분석
     # ------------------------------------------------------------------
 
-    def _step3_differences_and_inventive_step(self, feedback: Optional[str]) -> str:
-        step1_result = self._load_step_result(1)
-        step2_result = self._load_step_result(2)
-        claims_en = self._get_claims_en()
-        spec = self._get_spec()
-        examiner_opinion = self._get_oa_raw()
-        citations_block = self._build_citations_block()
-        citations_list = ", ".join(self.rejection.citations)
-        multi_citation = len(self.rejection.citations) > 1
+    def _step3_differences_and_inventive_step(self, messages: list[dict]) -> str:
+        if not messages:
+            step1_result = self._load_step_result(1)
+            step2_result = self._load_step_result(2)
+            claims_en = self._get_claims_en()
+            spec = self._get_spec()
+            examiner_opinion = self._get_oa_raw()
+            citations_block = self._build_citations_block()
+            citations_list = ", ".join(self.rejection.citations)
+            multi_citation = len(self.rejection.citations) > 1
 
-        combination_note = ""
-        if multi_citation:
-            combination_note = f"\n- 필요시: {citations_list}를 결합하려는 동기(TSM: Teaching, Suggestion, Motivation)가 인용문헌에 명시적으로 존재하는지 여부도 고려하라."
+            combination_note = ""
+            if multi_citation:
+                combination_note = f"\n- 필요시: {citations_list}를 결합하려는 동기(TSM: Teaching, Suggestion, Motivation)가 인용문헌에 명시적으로 존재하는지 여부도 고려하라."
 
-        prompt = f"""[Step 3: 심사관 지적 타당성 분석]
+            prompt = f"""[Step 3: 심사관 지적 타당성 분석]
 
 중요: 한국 특허법상 신규성 없는 발명에는 항상 진보성도 없다는 거절이 병행되므로,
 신규성/진보성 구분 없이 진보성 기준으로 분석하라.
@@ -301,26 +279,26 @@ Step 1에서 식별한 대표 독립항(들) 각각에 대해, 심사관의 신�
 
 출력 형식: 마크다운, 대표 독립항별 섹션으로 구분
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 4 — 전략 선택
     # ------------------------------------------------------------------
 
-    def _step4_response_strategy(self, feedback: Optional[str]) -> str:
-        step3_path = (
-            self.cases_root / self.case_id
-            / f"rejection_{self.rejection.id}"
-            / "step_3_result.md"
-        )
-        step3_result = step3_path.read_text(encoding="utf-8") if step3_path.exists() else ""
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
+    def _step4_response_strategy(self, messages: list[dict]) -> str:
+        if not messages:
+            step3_path = (
+                self.cases_root / self.case_id
+                / f"rejection_{self.rejection.id}"
+                / "step_3_result.md"
+            )
+            step3_result = step3_path.read_text(encoding="utf-8") if step3_path.exists() else ""
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
 
-        prompt = f"""[Step 4: 전략 선택]
+            prompt = f"""[Step 4: 전략 선택]
 
 == Step 3 결과 (차이점 분석 및 진보성 논거) ==
 {step3_result}
@@ -328,48 +306,41 @@ Step 1에서 식별한 대표 독립항(들) 각각에 대해, 심사관의 신�
 == 거절 대상 청구항 ==
 {claims_str}항 / 거절 유형: {self.rejection.subtype}
 
-위 분석을 바탕으로 세 가지 전략 중에서 고려할만한 전략들만을 선택적으로 제안하고, 권고안을 제시하라.
+위 분석을 바탕으로 두 가지 전략 중에서 고려할만한 전략들만을 선택적으로 제안하고, 권고안을 제시하라.
 
-A) 보정 전략 (Amendment)
-   - 어떤 구성요소를 어떻게 한정하여 차이점을 청구항에 명확히 반영할지 제안
-   - 청구항 보정 시 권리범위 축소 리스크 평가
-   - 보정 후 기대 효과
-
-B) 의견서 전략 (Written Opinion)
+A) 의견서 전략 (Written Opinion)
    - Step 3에서 도출된 논거를 활용한 의견서 핵심 주장 구성
-   - 신규성 주장 논거 (해당 시)
    - 진보성 주장 논거 (구조적 차이, 현저한 효과, 결합 동기 부재 등)
    - 심사관 논거 약점에 대한 반박 포인트
 
-C) 보정 + 의견서 병행 전략
-   - 위 A, B를 결합한 최적 시나리오
+B) 보정 + 의견서 병행 전략
+   - 어떤 구성요소를 어떻게 한정하여 차이점을 청구항에 명확히 반영할지 제안
+   - 청구항 보정 시 권리범위 축소 리스크 평가
    - 보정과 의견서의 역할 분담
 
 [권고안]
-   - 세 전략 중 가장 권고하는 방향과 그 이유를 명확히 제시하라.
-   - 리스크와 기대 성공 가능성을 함께 평가하라.
+   - 두 전략 중 가장 권고하는 방향과 그 이유를 명확히 제시하라.
 
 이 내용은 변리사가 검토하고 최종 확정한다.
-사용자 피드백이 있으면 그에 맞게 전략을 조정하라.
 
-출력 형식: 마크다운, A/B/C 섹션 + 권고안
+출력 형식: 마크다운, A/B 섹션 + 권고안
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 전략을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 5 — 대표청구항(독립항) 확정
     # ------------------------------------------------------------------
 
-    def _step5_confirm_claims(self, feedback: Optional[str]) -> str:
-        step1_result = self._load_step_result(1)
-        step4_result = self._load_step_result(4)
-        claims_en = self._get_claims_en()
+    def _step5_confirm_claims(self, messages: list[dict]) -> str:
+        if not messages:
+            step1_result = self._load_step_result(1)
+            step4_result = self._load_step_result(4)
+            claims_en = self._get_claims_en()
 
-        prompt = f"""[Step 5: 대표청구항(독립항) 확정]
+            prompt = f"""[Step 5: 대표청구항(독립항) 확정]
 
 아래 자료를 바탕으로 OA 대응에 사용할 최종 대표 청구항(Representative Claim)을 제안하라.
 
@@ -400,34 +371,33 @@ C) 보정 + 의견서 병행 전략
 
 ## 변리사 검토 사항
 
-[있으면 기재, 없으면 "(없음)"]
+상기 분석 결과에 따른 독립항이 적절하지 않은 경우, 실제로 확정하고자 하는 독립항을 직접 입력해 주세요.
 
 ---
 사용자가 승인하면 이 청구항이 Step 6 코멘트 작성의 기준이 된다.
 사용자가 피드백으로 청구항 원문을 직접 입력하거나 수정 지시를 입력하면 그 내용을 반영하여 재작성하라.
 """
-        if feedback:
-            prompt += f"\n\n[사용자 확정 내용 또는 수정 지시]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 6 — 영문 코멘트 작성
     # ------------------------------------------------------------------
 
-    def _step6_write_comment(self, feedback: Optional[str]) -> str:
-        step3_result = self._load_step_result(3)
-        step4_result = self._load_step_result(4)
-        step5_result = self._load_step_result(5)
-        oa_raw = self._get_oa_raw()
-        claims_en = self._get_claims_en()
-        citations_block = self._build_citations_block()
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
-        citations_list = ", ".join(self.rejection.citations)
-        sample_text = self._get_sample_reference()
+    def _step6_write_comment(self, messages: list[dict]) -> str:
+        if not messages:
+            step4_result = self._load_step_result(4)
+            step5_result = self._load_step_result(5)
+            oa_raw = self._get_oa_raw()
+            claims_en = self._get_claims_en()
+            citations_block = self._build_citations_block()
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
+            citations_list = ", ".join(self.rejection.citations)
+            sample_text = self._get_sample_reference()
 
-        prompt = f"""[Step 6: Write English Comment]
+            prompt = f"""[Step 6: Write English Comment]
 
 Write an English-only OA response comment strictly following the structure and phrasing of the sample below.
 
@@ -442,9 +412,6 @@ Write an English-only OA response comment strictly following the structure and p
 
 == Cited reference texts ==
 {citations_block}
-
-== Step 3 result (differences & inventive step arguments) ==
-{step3_result}
 
 == Step 4 result (selected strategy) ==
 {step4_result}
@@ -531,11 +498,10 @@ Write in the following order:
 
 Output format: Markdown with ## section headings.
 """
-        if feedback:
-            prompt += f"\n\n[사용자 수정 지시 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # 파일 캐시 헬퍼

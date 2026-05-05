@@ -104,6 +104,15 @@ def get_llm() -> LLMClient:
     return _llm
 
 
+def _merge_feedbacks(accumulated: str, new_feedback: str) -> str:
+    """
+    누적된 이전 피드백과 새 피드백을 단순 연결한다.
+    피드백 누적 합산 방식에서는 초기 프롬프트에 함께 삽입되므로 LLM 호출 불필요.
+    최신 피드백을 뒤에 배치하여 LLM이 우선 반영하도록 한다.
+    """
+    return accumulated + "\n\n" + new_feedback
+
+
 # ---------------------------------------------------------------------------
 # 핸들러 팩토리 (main.py와 동일한 로직)
 # ---------------------------------------------------------------------------
@@ -137,6 +146,7 @@ def _make_handler(rejection, session, llm, cases_root):
 class ExecuteRequest(BaseModel):
     step: Optional[int] = None
     feedback: Optional[str] = None
+    accumulated_feedback: Optional[str] = None
 
 
 class ApproveRequest(BaseModel):
@@ -581,6 +591,33 @@ async def get_step_result(case_id: str, rid: int, step: int):
     return {"content": path.read_text(encoding="utf-8")}
 
 
+@app.get("/api/cases/{case_id}/rejections/{rid}/steps/{step}/dialogue")
+async def get_step_dialogue(case_id: str, rid: int, step: int):
+    """특정 step의 대화 이력(피드백 + 응답)을 반환한다."""
+    path = CASES_ROOT / case_id / f"rejection_{rid}" / "dialogue.json"
+    if not path.exists():
+        return {"entries": []}
+    dialogue = json.loads(path.read_text(encoding="utf-8"))
+    entries = [e for e in dialogue if e.get("step") == step]
+
+    # 하위 호환: step 태그 도입 이전에 저장된 초기 결과 보완.
+    # filtered entries가 user 메시지로 시작하면, 그 앞에 있는
+    # step 태그 없는 마지막 assistant 항목을 찾아 맨 앞에 붙인다.
+    if entries and entries[0]["role"] == "user":
+        first_tagged_idx = next(
+            (i for i, e in enumerate(dialogue) if e.get("step") == step), None
+        )
+        if first_tagged_idx is not None and first_tagged_idx > 0:
+            untagged_before = [
+                e for e in dialogue[:first_tagged_idx]
+                if e.get("role") == "assistant" and "step" not in e
+            ]
+            if untagged_before:
+                entries = [untagged_before[-1]] + entries
+
+    return {"entries": entries}
+
+
 @app.get("/api/cases/{case_id}/rejections/{rid}/conclusion")
 async def get_conclusion(case_id: str, rid: int):
     """저장된 conclusion 파일을 반환한다."""
@@ -611,7 +648,14 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
 
     # 실행할 step 결정
     step = body.step if body.step is not None else max(rejection.current_step, 1)
-    feedback = body.feedback or None
+
+    # 피드백 누적 합산: 이전 피드백이 있으면 단순 연결 (LLM 추가 호출 없음)
+    new_feedback = body.feedback or None
+    accumulated = body.accumulated_feedback or None
+    if new_feedback and accumulated:
+        feedback = _merge_feedbacks(accumulated, new_feedback)
+    else:
+        feedback = new_feedback
 
     # 이전 단계가 승인되지 않은 경우 실행 불가 (순차 실행 강제)
     allowed_step = max(rejection.current_step, 1)
@@ -627,16 +671,54 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
         session.start_rejection(rid)
         save_session(session, CASES_ROOT)
 
+    # 사용자 피드백을 대화 이력에 저장 (원문 피드백, step 태그 포함)
+    if new_feedback:
+        append_dialogue(case_id, rid, "user", new_feedback, CASES_ROOT, step=step)
+
     llm = get_llm()
 
     # ------------------------------------------------------------------
+    # feedback → messages 변환
+    # 최초 실행(feedback 없음): messages=[] → step 메서드가 초기 프롬프트 구성
+    # 피드백 재생성: 저장된 초기 프롬프트 + 이전 결과 + 피드백으로 멀티턴 구성
+    # ------------------------------------------------------------------
+    prompt_file = CASES_ROOT / case_id / f"rejection_{rid}" / f"step_{step}_prompt.md"
+    result_file = CASES_ROOT / case_id / f"rejection_{rid}" / f"step_{step}_result.md"
+
+    if feedback:
+        initial_prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else ""
+        prev_result = result_file.read_text(encoding="utf-8") if result_file.exists() else ""
+        if initial_prompt and prev_result:
+            # 멀티턴 구조: 이전 결과를 assistant 턴으로 제공 → LLM이 전체 재분석 없이 수정만 수행
+            messages: list[dict] = [
+                {"role": "user",      "content": initial_prompt},
+                {"role": "assistant", "content": prev_result},
+                {"role": "user",      "content": feedback},
+            ]
+        elif initial_prompt:
+            # 이전 결과 파일이 없는 경우: 초기 프롬프트에 수정 지시 추가
+            messages = [
+                {"role": "user", "content": initial_prompt + "\n\n---\n[수정 지시]\n" + feedback},
+            ]
+        elif prev_result:
+            # 초기 프롬프트 파일이 없는 경우(이전 버전 결과): 이전 결과 + 수정 지시로 단일 메시지 구성
+            messages = [
+                {"role": "user", "content": f"이전 분석 결과:\n{prev_result}\n\n---\n[수정 지시]\n{feedback}"},
+            ]
+        else:
+            messages = [{"role": "user", "content": feedback}]
+    else:
+        messages = []
+
+    # ------------------------------------------------------------------
     # 스트리밍 인터셉터 설정
-    # LLM chat() 호출을 가로채서 청크를 큐에 넣는다
+    # chat() / chat_messages() 호출을 가로채서 청크를 큐에 넣는다
     # ------------------------------------------------------------------
     chunk_queue: stdlib_queue.Queue = stdlib_queue.Queue()
     result_holder: list[str] = []
     error_holder: list[str] = []
     original_chat = llm.chat
+    original_chat_messages = llm.chat_messages
 
     def streaming_chat(user_message: str, system_prompt: str = "", temperature: float = 0.3) -> str:
         accumulated = ""
@@ -649,15 +731,31 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
             raise
         return accumulated
 
+    def streaming_chat_messages(msgs: list[dict], system_prompt: str = "", temperature: float = 0.3) -> str:
+        # 최초 실행 시 초기 user 프롬프트를 파일에 저장 (이후 피드백 재생성에 활용)
+        if not prompt_file.exists() and msgs and msgs[0]["role"] == "user":
+            prompt_file.parent.mkdir(parents=True, exist_ok=True)
+            prompt_file.write_text(msgs[0]["content"], encoding="utf-8")
+        accumulated = ""
+        try:
+            for chunk in llm.chat_messages_stream(msgs, system_prompt, temperature):
+                chunk_queue.put(("chunk", chunk))
+                accumulated += chunk
+        except Exception as exc:
+            chunk_queue.put(("error", str(exc)))
+            raise
+        return accumulated
+
     def run_step():
         llm.chat = streaming_chat
+        llm.chat_messages = streaming_chat_messages
         try:
             handler = _make_handler(rejection, session, llm, CASES_ROOT)
-            result = handler.execute_step(step, feedback)
+            result = handler.execute_step(step, messages)
 
             # 결과 파일 저장
             save_step_result(case_id, rid, step, result, CASES_ROOT)
-            append_dialogue(case_id, rid, "assistant", result, CASES_ROOT)
+            append_dialogue(case_id, rid, "assistant", result, CASES_ROOT, step=step)
             result_holder.append(result)
         except Exception as exc:
             import traceback
@@ -665,6 +763,7 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
             chunk_queue.put(("error", str(exc)))
         finally:
             llm.chat = original_chat
+            llm.chat_messages = original_chat_messages
             chunk_queue.put(("done", None))
 
     thread = threading.Thread(target=run_step, daemon=True)
@@ -698,7 +797,7 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
                 result = result_holder[0] if result_holder else ""
                 tmp_handler = _make_handler(rejection, session, llm, CASES_ROOT)
                 total_steps = tmp_handler.STEPS
-                yield f"data: {json.dumps({'type': 'done', 'result': result, 'step': step, 'total_steps': total_steps})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'result': result, 'step': step, 'total_steps': total_steps, 'merged_feedback': feedback})}\n\n"
                 break
         else:
             yield f"data: {json.dumps({'type': 'error', 'message': '응답 시간 초과 (1800초)'})}\n\n"
@@ -732,7 +831,7 @@ async def approve_step(case_id: str, rid: int, body: ApproveRequest):
     total_steps = handler.STEPS
     is_last = step == total_steps
 
-    append_dialogue(case_id, rid, "user", "승인", CASES_ROOT)
+    append_dialogue(case_id, rid, "user", "승인", CASES_ROOT, step=step)
 
     if is_last:
         # 마지막 단계 — 결론 저장 + 거절이유 완료

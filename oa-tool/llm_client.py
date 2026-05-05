@@ -223,6 +223,32 @@ class LLMClient:
         else:
             raise ValueError(f"지원하지 않는 provider: {self.provider}")
 
+    def chat_messages(
+        self,
+        messages: list[dict],
+        system_prompt: str = "",
+        temperature: float = 0.3,
+    ) -> str:
+        """
+        멀티턴 대화 히스토리를 LLM에 보내고 응답 텍스트를 반환한다.
+
+        Args:
+            messages:      대화 히스토리 [{"role": "user"|"assistant", "content": "..."}]
+            system_prompt: 시스템 지침 (선택)
+            temperature:   생성 다양성 (0.0 ~ 1.0)
+
+        Returns:
+            LLM 응답 텍스트 (str)
+        """
+        if self.provider == "claude":
+            return self._chat_messages_claude(messages, system_prompt, temperature)
+        elif self.provider == "openai":
+            return self._chat_messages_openai(messages, system_prompt, temperature)
+        elif self.provider == "gemini":
+            return self._chat_messages_gemini(messages, system_prompt, temperature)
+        else:
+            raise ValueError(f"지원하지 않는 provider: {self.provider}")
+
     # ------------------------------------------------------------------
     # Provider별 구현
     # ------------------------------------------------------------------
@@ -272,6 +298,79 @@ class LLMClient:
             full_prompt, generation_config=generation_config
         )
         return response.text
+
+    def _chat_messages_claude(
+        self, messages: list[dict], system_prompt: str, temperature: float
+    ) -> str:
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": messages,
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        response = self._client.messages.create(**kwargs)
+        return response.content[0].text
+
+    def _chat_messages_openai(
+        self, messages: list[dict], system_prompt: str, temperature: float
+    ) -> str:
+        full_messages = []
+        if system_prompt:
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages)
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=full_messages,
+            max_tokens=self.max_tokens,
+            temperature=temperature,
+        )
+        return response.choices[0].message.content
+
+    def _chat_messages_gemini(
+        self, messages: list[dict], system_prompt: str, temperature: float
+    ) -> str:
+        model = self._client.GenerativeModel(self.model)
+        generation_config = self._client.types.GenerationConfig(
+            max_output_tokens=self.max_tokens,
+            temperature=temperature,
+        )
+        # system_prompt는 첫 번째 user 메시지 앞에 삽입 (단일 턴 방식과 일관성 유지)
+        gemini_msgs = []
+        for i, msg in enumerate(messages):
+            content = msg["content"]
+            if i == 0 and system_prompt:
+                content = f"{system_prompt}\n\n{content}"
+            gemini_msgs.append({
+                "role": "user" if msg["role"] == "user" else "model",
+                "parts": [content],
+            })
+        history = gemini_msgs[:-1]
+        last_content = gemini_msgs[-1]["parts"][0]
+        chat = model.start_chat(history=history)
+        response = chat.send_message(last_content, generation_config=generation_config)
+        return response.text
+
+    def chat_messages_stream(
+        self,
+        messages: list[dict],
+        system_prompt: str = "",
+        temperature: float = 0.3,
+    ):
+        """
+        멀티턴 대화 히스토리를 LLM에 보내고 응답을 청크 단위로 스트리밍한다.
+
+        Yields:
+            str: 텍스트 청크
+        """
+        if self.provider == "claude":
+            yield from self._stream_messages_claude(messages, system_prompt, temperature)
+        elif self.provider == "openai":
+            yield from self._stream_messages_openai(messages, system_prompt, temperature)
+        elif self.provider == "gemini":
+            yield from self._stream_messages_gemini(messages, system_prompt, temperature)
+        else:
+            raise ValueError(f"지원하지 않는 provider: {self.provider}")
 
     # ------------------------------------------------------------------
     # Provider별 스트리밍 구현
@@ -329,6 +428,70 @@ class LLMClient:
         for chunk in response:
             # 일부 청크는 텍스트 없이 안전 등급/메타데이터만 포함하므로
             # ValueError가 발생할 수 있어 개별적으로 처리한다
+            try:
+                text = chunk.text
+                if text:
+                    yield text
+            except (ValueError, AttributeError):
+                continue
+
+    def _stream_messages_claude(
+        self, messages: list[dict], system_prompt: str, temperature: float
+    ):
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": messages,
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        with self._client.messages.stream(**kwargs) as stream:
+            for text in stream.text_stream:
+                yield text
+
+    def _stream_messages_openai(
+        self, messages: list[dict], system_prompt: str, temperature: float
+    ):
+        full_messages = []
+        if system_prompt:
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages)
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=full_messages,
+            max_tokens=self.max_tokens,
+            temperature=temperature,
+            stream=True,
+        )
+        for chunk in response:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
+    def _stream_messages_gemini(
+        self, messages: list[dict], system_prompt: str, temperature: float
+    ):
+        model = self._client.GenerativeModel(self.model)
+        generation_config = self._client.types.GenerationConfig(
+            max_output_tokens=self.max_tokens,
+            temperature=temperature,
+        )
+        gemini_msgs = []
+        for i, msg in enumerate(messages):
+            content = msg["content"]
+            if i == 0 and system_prompt:
+                content = f"{system_prompt}\n\n{content}"
+            gemini_msgs.append({
+                "role": "user" if msg["role"] == "user" else "model",
+                "parts": [content],
+            })
+        history = gemini_msgs[:-1]
+        last_content = gemini_msgs[-1]["parts"][0]
+        chat = model.start_chat(history=history)
+        response = chat.send_message(
+            last_content, generation_config=generation_config, stream=True
+        )
+        for chunk in response:
             try:
                 text = chunk.text
                 if text:

@@ -563,11 +563,13 @@ def _merge_prior_art_rejections(rejections: List[RejectionInfo]) -> List[Rejecti
             combined_opinion_parts: List[str] = []
             subtypes: List[str] = []
 
+            all_claims_flag = any(r.claims == [-1] for r in group)
             for r in group:
-                for c in r.claims:
-                    if c not in seen_claims:
-                        seen_claims.add(c)
-                        combined_claims.append(c)
+                if not all_claims_flag:
+                    for c in r.claims:
+                        if c not in seen_claims:
+                            seen_claims.add(c)
+                            combined_claims.append(c)
                 for c in r.citations:
                     if c not in seen_citations:
                         seen_citations.add(c)
@@ -590,7 +592,7 @@ def _merge_prior_art_rejections(rejections: List[RejectionInfo]) -> List[Rejecti
                 id=group[0].id,
                 type="prior_art",
                 subtype=merged_subtype,
-                claims=combined_claims,
+                claims=[-1] if all_claims_flag else combined_claims,
                 citations=combined_citations,
                 has_citations=False,
                 raw_text="\n\n".join(combined_text_parts),

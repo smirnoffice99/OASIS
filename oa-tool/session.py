@@ -404,6 +404,7 @@ def append_dialogue(
     role: str,
     content: str,
     cases_root: str | Path = "cases",
+    step: int | None = None,
 ) -> None:
     """
     cases/{case_id}/rejection_{n}/dialogue.json 에 대화 항목을 추가한다.
@@ -411,6 +412,7 @@ def append_dialogue(
     Args:
         role:    "assistant" 또는 "user"
         content: 메시지 내용
+        step:    단계 번호 (있으면 저장, 없으면 생략)
     """
     rejection_dir = Path(cases_root) / case_id / f"rejection_{rejection_id}"
     rejection_dir.mkdir(parents=True, exist_ok=True)
@@ -421,11 +423,15 @@ def append_dialogue(
         with open(path, "r", encoding="utf-8") as f:
             dialogue = json.load(f)
 
-    dialogue.append({
+    entry: dict = {
         "timestamp": _now_iso(),
         "role": role,
         "content": content,
-    })
+    }
+    if step is not None:
+        entry["step"] = step
+
+    dialogue.append(entry)
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(dialogue, f, ensure_ascii=False, indent=2)

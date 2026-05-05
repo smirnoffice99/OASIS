@@ -56,7 +56,7 @@ class ClarityHandler(BaseHandler):
     # BaseHandler 추상 메서드 구현
     # ------------------------------------------------------------------
 
-    def execute_step(self, step: int, feedback: Optional[str] = None) -> str:
+    def execute_step(self, step: int, messages: list[dict]) -> str:
         dispatch = {
             1: self._step1_identify_deficiency,
             2: self._step2_analyze_claims_and_spec,
@@ -66,18 +66,19 @@ class ClarityHandler(BaseHandler):
         fn = dispatch.get(step)
         if fn is None:
             raise ValueError(f"ClarityHandler에 존재하지 않는 단계: {step}")
-        return fn(feedback)
+        return fn(messages)
 
     # ------------------------------------------------------------------
     # Step 1 — 불비 유형 파악
     # ------------------------------------------------------------------
 
-    def _step1_identify_deficiency(self, feedback: Optional[str]) -> str:
-        claims_en = self._get_claims_en()
-        oa_raw = self._get_oa_raw()
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
+    def _step1_identify_deficiency(self, messages: list[dict]) -> str:
+        if not messages:
+            claims_en = self._get_claims_en()
+            oa_raw = self._get_oa_raw()
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
 
-        prompt = f"""[Step 1: 기재불비 유형 파악]
+            prompt = f"""[Step 1: 기재불비 유형 파악]
 
 아래는 의견제출통지서 원문과 영문 청구항입니다.
 
@@ -106,28 +107,28 @@ class ClarityHandler(BaseHandler):
 
 출력 형식: 마크다운, 한국어 (청구항 인용 부분은 영문 원문 그대로)
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("clarity")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 2 — 청구항 + 명세서 대응 부분 분석
     # ------------------------------------------------------------------
 
-    def _step2_analyze_claims_and_spec(self, feedback: Optional[str]) -> str:
-        step1_path = (
-            self.cases_root / self.case_id
-            / f"rejection_{self.rejection.id}"
-            / "step_1_result.md"
-        )
-        step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
-        claims_en = self._get_claims_en()
-        spec = self._get_spec()
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
+    def _step2_analyze_claims_and_spec(self, messages: list[dict]) -> str:
+        if not messages:
+            step1_path = (
+                self.cases_root / self.case_id
+                / f"rejection_{self.rejection.id}"
+                / "step_1_result.md"
+            )
+            step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
+            claims_en = self._get_claims_en()
+            spec = self._get_spec()
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
 
-        prompt = f"""[Step 2: 청구항 + 명세서 대응 부분 분석]
+            prompt = f"""[Step 2: 청구항 + 명세서 대응 부분 분석]
 
 == Step 1 결과 (불비 유형 파악) ==
 {step1_result}
@@ -157,32 +158,32 @@ class ClarityHandler(BaseHandler):
 
 출력 형식: 마크다운, 번호별 섹션
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("clarity")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 3 — 대응 전략 제안 및 확정
     # ------------------------------------------------------------------
 
-    def _step3_response_strategy(self, feedback: Optional[str]) -> str:
-        step1_path = (
-            self.cases_root / self.case_id
-            / f"rejection_{self.rejection.id}"
-            / "step_1_result.md"
-        )
-        step2_path = (
-            self.cases_root / self.case_id
-            / f"rejection_{self.rejection.id}"
-            / "step_2_result.md"
-        )
-        step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
-        step2_result = step2_path.read_text(encoding="utf-8") if step2_path.exists() else ""
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
+    def _step3_response_strategy(self, messages: list[dict]) -> str:
+        if not messages:
+            step1_path = (
+                self.cases_root / self.case_id
+                / f"rejection_{self.rejection.id}"
+                / "step_1_result.md"
+            )
+            step2_path = (
+                self.cases_root / self.case_id
+                / f"rejection_{self.rejection.id}"
+                / "step_2_result.md"
+            )
+            step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
+            step2_result = step2_path.read_text(encoding="utf-8") if step2_path.exists() else ""
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
 
-        prompt = f"""[Step 3: 기재불비 대응 전략 제안 및 확정]
+            prompt = f"""[Step 3: 기재불비 대응 전략 제안 및 확정]
 
 == Step 1 결과 (불비 유형 파악) ==
 {step1_result}
@@ -221,27 +222,27 @@ D) 보정 + 의견서 병행 (Combined Strategy)
 
 출력 형식: 마크다운, A/B/C/D 섹션 + 권고안
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 전략을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("clarity")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 4 — 영문 코멘트 작성
     # ------------------------------------------------------------------
 
-    def _step4_write_comment(self, feedback: Optional[str]) -> str:
-        step1_result = self._load_step_result(1)
-        step2_result = self._load_step_result(2)
-        step3_result = self._load_step_result(3)
-        oa_raw = self._get_oa_raw()
-        claims_en = self._get_claims_en()
-        spec = self._get_spec()
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
-        sample_text = self._get_sample_reference()
+    def _step4_write_comment(self, messages: list[dict]) -> str:
+        if not messages:
+            step1_result = self._load_step_result(1)
+            step2_result = self._load_step_result(2)
+            step3_result = self._load_step_result(3)
+            oa_raw = self._get_oa_raw()
+            claims_en = self._get_claims_en()
+            spec = self._get_spec()
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
+            sample_text = self._get_sample_reference()
 
-        prompt = f"""[Step 4: 기재불비 영문 코멘트 작성]
+            prompt = f"""[Step 4: 기재불비 영문 코멘트 작성]
 
 == [최우선 참조] 샘플 코멘트 ==
 {sample_text}
@@ -281,11 +282,10 @@ D) 보정 + 의견서 병행 (Combined Strategy)
 - 전문 용어는 claims_en의 표현을 그대로 사용한다.
 - 언어: 전체 영어. 한국어 사용 금지.
 """
-        if feedback:
-            prompt += f"\n\n[사용자 수정 지시 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("clarity")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # 헬퍼 — step 결과 로드 / 샘플 참조

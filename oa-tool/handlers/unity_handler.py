@@ -53,7 +53,7 @@ class UnityHandler(BaseHandler):
     # BaseHandler 추상 메서드 구현
     # ------------------------------------------------------------------
 
-    def execute_step(self, step: int, feedback: Optional[str] = None) -> str:
+    def execute_step(self, step: int, messages: list[dict]) -> str:
         if self.rejection.has_citations:
             dispatch = {
                 1: self._step1_with_citations,
@@ -71,18 +71,19 @@ class UnityHandler(BaseHandler):
         fn = dispatch.get(step)
         if fn is None:
             raise ValueError(f"UnityHandler에 존재하지 않는 단계: {step}")
-        return fn(feedback)
+        return fn(messages)
 
     # ------------------------------------------------------------------
     # [has_citations=False] Step 1 — 단일성 위반 내용 파악
     # ------------------------------------------------------------------
 
-    def _step1_no_citations(self, feedback: Optional[str]) -> str:
-        claims_en = self._get_claims_en()
-        oa_raw = self._get_oa_raw()
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
+    def _step1_no_citations(self, messages: list[dict]) -> str:
+        if not messages:
+            claims_en = self._get_claims_en()
+            oa_raw = self._get_oa_raw()
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
 
-        prompt = f"""[Step 1: 단일성 위반 내용 파악 (인용발명 없음)]
+            prompt = f"""[Step 1: 단일성 위반 내용 파악 (인용발명 없음)]
 
 아래는 의견제출통지서 원문과 영문 청구항입니다.
 
@@ -110,23 +111,23 @@ class UnityHandler(BaseHandler):
 
 출력 형식: 마크다운, 한국어 (청구항 인용 부분은 영문 원문 그대로)
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("unity")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # [has_citations=False] Step 2 — STF 분석
     # ------------------------------------------------------------------
 
-    def _step2_no_citations(self, feedback: Optional[str]) -> str:
-        step1_path = self._step_path(1)
-        step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
-        claims_en = self._get_claims_en()
-        spec = self._get_spec()
+    def _step2_no_citations(self, messages: list[dict]) -> str:
+        if not messages:
+            step1_path = self._step_path(1)
+            step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
+            claims_en = self._get_claims_en()
+            spec = self._get_spec()
 
-        prompt = f"""[Step 2: STF 분석 (인용발명 없음)]
+            prompt = f"""[Step 2: STF 분석 (인용발명 없음)]
 
 ※ 분석 범위: 각 그룹의 독립항만을 대상으로 한다. 종속항은 이 단계에서 분석하지 않는다.
 
@@ -158,24 +159,24 @@ class UnityHandler(BaseHandler):
 
 출력 형식: 마크다운, 번호별 섹션, 간결하게
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("unity")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # [has_citations=True] Step 1 — 단일성 위반 내용 + 인용발명 파악
     # ------------------------------------------------------------------
 
-    def _step1_with_citations(self, feedback: Optional[str]) -> str:
-        claims_en = self._get_claims_en()
-        oa_raw = self._get_oa_raw()
-        citations_block = self._build_citations_block()
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
-        citations_list = ", ".join(self.rejection.citations)
+    def _step1_with_citations(self, messages: list[dict]) -> str:
+        if not messages:
+            claims_en = self._get_claims_en()
+            oa_raw = self._get_oa_raw()
+            citations_block = self._build_citations_block()
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
+            citations_list = ", ".join(self.rejection.citations)
 
-        prompt = f"""[Step 1: 단일성 위반 내용 및 인용발명 파악 (인용발명 있음)]
+            prompt = f"""[Step 1: 단일성 위반 내용 및 인용발명 파악 (인용발명 있음)]
 
 아래는 의견제출통지서 원문, 영문 청구항, 인용문헌입니다.
 
@@ -209,25 +210,25 @@ class UnityHandler(BaseHandler):
 
 출력 형식: 마크다운, 한국어 (청구항·인용문헌 인용 부분은 원문 그대로)
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("unity_with_citations")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # [has_citations=True] Step 2 — 인용발명 대비 STF 분석
     # ------------------------------------------------------------------
 
-    def _step2_with_citations(self, feedback: Optional[str]) -> str:
-        step1_path = self._step_path(1)
-        step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
-        claims_en = self._get_claims_en()
-        spec = self._get_spec()
-        citations_block = self._build_citations_block()
-        citations_list = ", ".join(self.rejection.citations)
+    def _step2_with_citations(self, messages: list[dict]) -> str:
+        if not messages:
+            step1_path = self._step_path(1)
+            step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
+            claims_en = self._get_claims_en()
+            spec = self._get_spec()
+            citations_block = self._build_citations_block()
+            citations_list = ", ".join(self.rejection.citations)
 
-        prompt = f"""[Step 2: 인용발명 대비 STF 분석 (인용발명 있음)]
+            prompt = f"""[Step 2: 인용발명 대비 STF 분석 (인용발명 있음)]
 
 ※ 분석 범위: 각 그룹의 독립항만을 대상으로 한다. 종속항은 이 단계에서 분석하지 않는다.
 
@@ -267,33 +268,32 @@ class UnityHandler(BaseHandler):
 
 출력 형식: 마크다운, 번호별 섹션, 간결하게
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("unity_with_citations")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 3 — 전략 확정 (두 흐름 공통)
     # ------------------------------------------------------------------
 
-    def _step3_strategy(self, feedback: Optional[str]) -> str:
-        step1_path = self._step_path(1)
-        step2_path = self._step_path(2)
-        step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
-        step2_result = step2_path.read_text(encoding="utf-8") if step2_path.exists() else ""
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
-        citations_note = (
-            f"인용발명: {', '.join(self.rejection.citations)}"
-            if self.rejection.has_citations
-            else "인용발명 없음"
-        )
-
+    def _step3_strategy(self, messages: list[dict]) -> str:
         system_prompt_key = (
             "unity_with_citations" if self.rejection.has_citations else "unity"
         )
+        if not messages:
+            step1_path = self._step_path(1)
+            step2_path = self._step_path(2)
+            step1_result = step1_path.read_text(encoding="utf-8") if step1_path.exists() else ""
+            step2_result = step2_path.read_text(encoding="utf-8") if step2_path.exists() else ""
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
+            citations_note = (
+                f"인용발명: {', '.join(self.rejection.citations)}"
+                if self.rejection.has_citations
+                else "인용발명 없음"
+            )
 
-        prompt = f"""[Step 3: 전략 확정]
+            prompt = f"""[Step 3: 전략 확정]
 
 == Step 1 결과 ==
 {step1_result}
@@ -334,39 +334,40 @@ D) 분할출원 (Divisional Application)
 
 출력 형식: 마크다운, A/B/C/D 섹션 + 최종 확정 전략
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 전략을 재확정하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt(system_prompt_key)
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # Step 4 — 영문 코멘트 작성 (두 흐름 공통)
     # ------------------------------------------------------------------
 
-    def _step4_write_comment(self, feedback: Optional[str]) -> str:
-        step1_result = self._load_step_result(1)
-        step2_result = self._load_step_result(2)
-        step3_result = self._load_step_result(3)
-        oa_raw = self._get_oa_raw()
-        claims_en = self._get_claims_en()
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
-        citations_note = (
-            f"인용발명: {', '.join(self.rejection.citations)}"
-            if self.rejection.has_citations
-            else "인용발명 없음"
-        )
-        citations_block = self._build_citations_block() if self.rejection.has_citations else ""
-        sample_text = self._get_sample_reference()
+    def _step4_write_comment(self, messages: list[dict]) -> str:
+        system_key = "unity_with_citations" if self.rejection.has_citations else "unity"
+        if not messages:
+            step1_result = self._load_step_result(1)
+            step2_result = self._load_step_result(2)
+            step3_result = self._load_step_result(3)
+            oa_raw = self._get_oa_raw()
+            claims_en = self._get_claims_en()
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
+            citations_note = (
+                f"인용발명: {', '.join(self.rejection.citations)}"
+                if self.rejection.has_citations
+                else "인용발명 없음"
+            )
+            citations_block = self._build_citations_block() if self.rejection.has_citations else ""
+            sample_text = self._get_sample_reference()
 
-        prior_art_section = ""
-        if self.rejection.has_citations:
-            prior_art_section = f"""
+            prior_art_section = ""
+            if self.rejection.has_citations:
+                prior_art_section = f"""
 == 인용문헌 원문 ==
 {citations_block}
 """
 
-        prompt = f"""[Step 4: 단일성 위반 영문 코멘트 작성]
+            prompt = f"""[Step 4: 단일성 위반 영문 코멘트 작성]
 
 아래 자료를 바탕으로 영문 OA 대응 코멘트를 작성하라.
 [양식 참고] 섹션의 구조와 문체를 최우선으로 따른다.
@@ -436,12 +437,10 @@ D) 분할출원 (Divisional Application)
 전문 용어: claims_en.docx의 용어를 그대로 사용하라.
 출력 형식: 마크다운 (제목은 ## 사용)
 """
-        if feedback:
-            prompt += f"\n\n[사용자 수정 지시 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
-        system_key = "unity_with_citations" if self.rejection.has_citations else "unity"
         system = self.llm.load_prompt(system_key)
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # 헬퍼 — step 결과 로드 / 샘플 참조

@@ -1,26 +1,105 @@
-# OA 대응 자동화 툴 — Agent 지침
+# CLAUDE.md
 
-## 목적
-한국 특허청 의견제출통지서 대응 자동화
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 거절이유 유형
-- 선행기술 위반 (prior_art): 신규성+진보성 통합. Step 4는 항상 진보성 기준으로 처리
-- 기재불비 (clarity): 명세서 내부 분석만, 인용발명 없음
-- 단일성 (unity): has_citations 플래그에 따라 흐름 자동 분기
-- 기타 (other): 사용자와 협의 후 진행
+## Commands
 
-## 핵심 규칙
-- 사용자 승인 없이 절대 다음 단계로 넘어가지 마라
-- 인용문헌 분석 시 반드시 출처(컬럼/단락/페이지)를 명시해라
-- 영문 코멘트는 claims_en.docx의 용어를 그대로 사용해라
-- 모든 분석 결과는 파일로 저장 후 터미널에 출력해라
-- API 키는 환경변수로만 관리하고 코드에 직접 입력하지 마라
+```bash
+# CLI
+python main.py                            # Interactive case ID prompt
+python main.py KR-2024-12345             # Direct case ID
+python main.py KR-2024-12345 --report    # Regenerate report only
 
-## 파일 저장 위치
-- 분석 결과: cases/{사건번호}/rejection_{n}/
-- 최종 출력: cases/{사건번호}/final_comment.docx
-- 샘플: samples/{유형}/
+# Web UI
+uvicorn web.app:app --reload --port 8000  # http://localhost:8000
+# Windows shortcut: run_web.bat
 
-## LLM 설정
-- config.yaml에서 provider/model 변경 가능
-- 기본값: claude / claude-sonnet-4-6
+# Tests (all mock LLM calls and input() — no API key needed)
+python test_e2e.py                        # End-to-end: all handlers + report
+python test_oa_parser.py                  # Parser unit tests
+python test_prior_art_handler.py          # Individual handler tests
+python test_clarity_handler.py
+python test_unity_handler.py
+python test_default_handler.py
+python test_report_generator.py
+python test_sample_manager.py
+python test_main.py
+
+# Sample management
+python sample_manager.py add <file> --type <type>   # prior_art|clarity|unity|other
+python sample_manager.py list
+python sample_manager.py stats
+
+# Build (Windows — produces dist/OASIS/OASIS.exe)
+build.bat
+```
+
+## Architecture
+
+### Data Flow
+
+```
+cases/{case_id}/oa.pdf + spec.pdf + claims_en.docx [+ citations/]
+    → oa_parser.py        — extract rejections, classify type, set has_citations
+    → session.py          — persist state to session.json
+    → handlers/*          — type-specific multi-step analysis with user gates
+    → sample_manager.py   — select style examples (few-shot or RAG)
+    → report_generator.py — write final_comment.docx
+```
+
+CLI (`main.py`) and web (`web/app.py`) share all modules above. The web app exposes REST + SSE endpoints consumed by `web/static/` (plain HTML/JS with no build step).
+
+### Rejection Handlers (`handlers/`)
+
+`BaseHandler` owns the step loop: LLM call → print → await user input → save result. Subclasses implement `STEPS` (int) and `execute_step(step, feedback)`.
+
+| Type | Handler | Steps | Notes |
+|------|---------|-------|-------|
+| prior_art | `PriorArtHandler` | 6 | Steps 1–3: invention/citation/diff; Steps 4–5: strategy + claim confirmation; Step 6: English comment |
+| clarity | `ClarityHandler` | 3 | No citations; spec-internal analysis only |
+| unity | `UnityHandler` | 3 | Branches on `has_citations` — different Step 1 & 2 logic |
+| other | `DefaultHandler` | variable | User-driven |
+
+Special commands handled in `BaseHandler`: `Y`/`승인` (approve), `종료` (save & exit), `재검토 N` (reopen rejection N), `승인취소` (undo last approval).
+
+### LLM Client (`llm_client.py`)
+
+Single gateway for all LLM calls. Provider/model set in `config.yaml` (currently: `gemini` / `gemini-2.5-flash`). Supports Claude, OpenAI, Gemini. Lazily initialized once with a module-level lock; shared across all web requests.
+
+**OCR path**: image-only PDF pages → try Windows WinRT OCR first (via `winrt-*` Python bindings, no subprocess) → fall back to LLM Vision. WinRT runs on a dedicated daemon `asyncio` loop (`_get_winrt_loop()`) so completion callbacks are always delivered regardless of thread context. Results cached as `{stem}_ocr.txt`.
+
+### Session Persistence (`session.py`)
+
+`cases/{case_id}/session.json` tracks per-rejection `status` (`pending` / `in_progress` / `concluded`) and `current_step`. On restart, `concluded` rejections are skipped; others resume.
+
+### Sample Style Learning (`sample_manager.py`)
+
+- **< 20 samples**: few-shot — 3 most recently modified samples in prompt
+- **≥ 20 samples**: RAG — chromadb semantic search (optional deps: `chromadb` + `sentence-transformers`; not in `requirements.txt`; requires C++ Build Tools)
+
+### Web API (`web/app.py`)
+
+`execute` and `report/draft` endpoints stream SSE via `StreamingResponse`. Key groups: Cases CRUD, Parse, Steps (execute/approve/cancel-approval/reopen), Citations OCR, Report (draft/finalize/download), Session.
+
+In PyInstaller builds, `OASIS_DATA_DIR` env var overrides where `cases/` and `samples/` are stored.
+
+## Core Rules
+
+- **Never advance to next step without explicit `Y` / `승인`**
+- Non-approval user input → regenerate current step with that feedback
+- Always cite source (column/paragraph/page) when quoting references
+- Use terminology from `claims_en.docx` verbatim in all English output
+- Save every step result to `cases/{case_id}/rejection_{n}/step_{x}_result.md` before printing
+
+## LLM Config (`config.yaml`)
+
+```yaml
+provider: gemini            # claude | openai | gemini
+model: gemini-2.5-flash
+api_key_env: GOOGLE_API_KEY
+max_tokens: 16000
+```
+
+## Mock Test Case
+
+`KR-TEST-001` — all 4 rejection types, mock files under `cases/KR-TEST-001/`. No real PDFs needed.

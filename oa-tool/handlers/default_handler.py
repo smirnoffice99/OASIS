@@ -115,7 +115,7 @@ class DefaultHandler(BaseHandler):
     # execute_step 구현 — 계획 기반 분배
     # ------------------------------------------------------------------
 
-    def execute_step(self, step: int, feedback: Optional[str] = None) -> str:
+    def execute_step(self, step: int, messages: list[dict]) -> str:
         """
         step이 분석 단계(1 ~ len(plan))이면 해당 분석 실행,
         마지막 단계(len(plan)+1)이면 최종 전략 단계 실행.
@@ -129,11 +129,11 @@ class DefaultHandler(BaseHandler):
 
         if step <= analysis_step_count:
             step_title = self._plan[step - 1]
-            return self._execute_analysis_step(step, step_title, feedback)
+            return self._execute_analysis_step(step, step_title, messages)
         elif step == strategy_step:
-            return self._execute_strategy_step(feedback)
+            return self._execute_strategy_step(messages)
         elif step == comment_step:
-            return self._execute_comment_step(feedback)
+            return self._execute_comment_step(messages)
         else:
             raise ValueError(
                 f"DefaultHandler: 존재하지 않는 단계 {step} "
@@ -195,8 +195,12 @@ class DefaultHandler(BaseHandler):
 
         # 3. 계획 초안 출력
         print("\n" + plan_draft)
+        plan_messages = [
+            {"role": "user", "content": plan_prompt},
+            {"role": "assistant", "content": plan_draft},
+        ]
 
-        # 4. 변리사와 계획 협의 루프
+        # 4. 변리사와 계획 협의 루프 (멀티턴)
         while True:
             user_input = self._prompt_user(
                 "\n분석 계획을 확인하세요.\n"
@@ -238,16 +242,14 @@ class DefaultHandler(BaseHandler):
                 raise ReviewRequested(rid)
 
             else:
-                # 피드백 → 계획 재생성
+                # 피드백 → 히스토리에 추가 후 계획 재생성
                 append_dialogue(
                     self.case_id, self.rejection.id, "user", user_input, self.cases_root
                 )
                 self._print("피드백을 반영하여 분석 계획을 재생성합니다...")
-                revise_prompt = (
-                    f"{plan_prompt}\n\n"
-                    f"[변리사 피드백 — 아래 내용을 반영하여 계획을 수정하라]\n{user_input}"
-                )
-                plan_draft = self.llm.chat(revise_prompt, system_prompt=system)
+                plan_messages.append({"role": "user", "content": user_input})
+                plan_draft = self.llm.chat_messages(plan_messages, system_prompt=system)
+                plan_messages.append({"role": "assistant", "content": plan_draft})
                 append_dialogue(
                     self.case_id, self.rejection.id, "assistant", plan_draft, self.cases_root
                 )
@@ -258,17 +260,18 @@ class DefaultHandler(BaseHandler):
     # ------------------------------------------------------------------
 
     def _execute_analysis_step(
-        self, step: int, step_title: str, feedback: Optional[str]
+        self, step: int, step_title: str, messages: list[dict]
     ) -> str:
         """계획의 분석 단계 하나를 실행한다."""
-        oa_raw = self._get_oa_raw()
-        claims_en = self._get_claims_en()
-        spec = self._get_spec()
+        if not messages:
+            oa_raw = self._get_oa_raw()
+            claims_en = self._get_claims_en()
+            spec = self._get_spec()
 
-        # 이전 단계 결과 수집 (컨텍스트용)
-        prior_results = self._collect_prior_results(step)
+            # 이전 단계 결과 수집 (컨텍스트용)
+            prior_results = self._collect_prior_results(step)
 
-        prompt = f"""[Step {step}: {step_title}]
+            prompt = f"""[Step {step}: {step_title}]
 
 == 거절이유 원문 ==
 {oa_raw}
@@ -279,10 +282,10 @@ class DefaultHandler(BaseHandler):
 == 명세서 ==
 {spec}
 """
-        if prior_results:
-            prompt += f"\n== 이전 단계 분석 결과 ==\n{prior_results}\n"
+            if prior_results:
+                prompt += f"\n== 이전 단계 분석 결과 ==\n{prior_results}\n"
 
-        prompt += f"""
+            prompt += f"""
 위 자료를 바탕으로 '{step_title}' 분석을 수행하라.
 
 분석 시 유의사항:
@@ -293,22 +296,22 @@ class DefaultHandler(BaseHandler):
 
 출력 형식: 마크다운, 한국어 (청구항·인용문헌 인용 부분은 원문 그대로)
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("default")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # 전략 단계 실행
     # ------------------------------------------------------------------
 
-    def _execute_strategy_step(self, feedback: Optional[str]) -> str:
+    def _execute_strategy_step(self, messages: list[dict]) -> str:
         """최종 대응 전략 단계를 실행한다."""
-        all_results = self._collect_prior_results(self.STEPS + 1)  # 전체 결과
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
+        if not messages:
+            all_results = self._collect_prior_results(self.STEPS + 1)  # 전체 결과
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
 
-        prompt = f"""[최종 단계: 대응 전략 제안 및 확정]
+            prompt = f"""[최종 단계: 대응 전략 제안 및 확정]
 
 == 지금까지 분석 결과 ==
 {all_results}
@@ -336,25 +339,25 @@ class DefaultHandler(BaseHandler):
 
 출력 형식: 마크다운, 번호별 섹션
 """
-        if feedback:
-            prompt += f"\n\n[사용자 피드백 — 아래 전략을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("default")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     # ------------------------------------------------------------------
     # 코멘트 단계 실행
     # ------------------------------------------------------------------
 
-    def _execute_comment_step(self, feedback: Optional[str]) -> str:
+    def _execute_comment_step(self, messages: list[dict]) -> str:
         """최종 영문 코멘트를 작성한다."""
-        all_results = self._collect_prior_results(self.STEPS + 1)
-        oa_raw = self._get_oa_raw()
-        claims_en = self._get_claims_en()
-        claims_str = ", ".join(str(c) for c in self.rejection.claims)
-        sample_text = self._get_sample_reference()
+        if not messages:
+            all_results = self._collect_prior_results(self.STEPS + 1)
+            oa_raw = self._get_oa_raw()
+            claims_en = self._get_claims_en()
+            claims_str = ", ".join(str(c) for c in self.rejection.claims)
+            sample_text = self._get_sample_reference()
 
-        prompt = f"""[코멘트 단계: 영문 코멘트 작성]
+            prompt = f"""[코멘트 단계: 영문 코멘트 작성]
 
 아래 자료를 바탕으로 영문 OA 대응 코멘트를 작성하라.
 [양식 참고] 샘플이 있으면 그 구조와 문체를 최우선으로 따른다.
@@ -387,11 +390,10 @@ class DefaultHandler(BaseHandler):
 전문 용어: claims_en.docx의 용어를 그대로 사용하라.
 출력 형식: 마크다운 (제목은 ## 사용)
 """
-        if feedback:
-            prompt += f"\n\n[사용자 수정 지시 — 아래 내용을 반영하여 재작성하라]\n{feedback}"
+            messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("default")
-        return self.llm.chat(prompt, system_prompt=system)
+        return self.llm.chat_messages(messages, system_prompt=system)
 
     def _get_sample_reference(self) -> str:
         samples_dir = self.cases_root.parent / "samples" / "other"

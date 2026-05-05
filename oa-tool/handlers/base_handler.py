@@ -103,13 +103,14 @@ class BaseHandler(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def execute_step(self, step: int, feedback: Optional[str] = None) -> str:
+    def execute_step(self, step: int, messages: list[dict]) -> str:
         """
         step 번호에 해당하는 분석을 수행하고 결과 텍스트를 반환한다.
 
         Args:
             step:     현재 단계 번호 (1-based)
-            feedback: 사용자 피드백 (None이면 최초 생성)
+            messages: 대화 히스토리 [{"role": "user"|"assistant", "content": "..."}]
+                      빈 리스트이면 최초 생성, 이후에는 누적된 히스토리를 전달한다.
 
         Returns:
             분석 결과 마크다운 문자열
@@ -176,12 +177,13 @@ class BaseHandler(ABC):
         self._print_separator(minor=True)
         self._print(f"  Step {step} / {self.STEPS} 분석 중...")
 
-        feedback: Optional[str] = None
+        messages: list[dict] = []
         is_final_step = (step == self.STEPS)
 
         while True:
-            # LLM 호출
-            result = self.execute_step(step, feedback)
+            # LLM 호출 (최초: 빈 messages → 각 핸들러가 초기 프롬프트 구성)
+            result = self.execute_step(step, messages)
+            messages.append({"role": "assistant", "content": result})
 
             # 파일 저장
             saved_path = save_step_result(
@@ -241,8 +243,8 @@ class BaseHandler(ABC):
                         raise StepCancelRequested()
 
                 else:
-                    # 피드백 → 재생성
-                    feedback = user_input
+                    # 피드백 → 히스토리에 추가 후 재생성
+                    messages.append({"role": "user", "content": user_input})
                     append_dialogue(
                         self.case_id, self.rejection.id, "user", user_input, self.cases_root
                     )
@@ -290,8 +292,8 @@ class BaseHandler(ABC):
                         raise StepCancelRequested()
 
                 else:
-                    # 피드백 → 현재 step 재생성
-                    feedback = user_input
+                    # 피드백 → 히스토리에 추가 후 현재 step 재생성
+                    messages.append({"role": "user", "content": user_input})
                     append_dialogue(
                         self.case_id, self.rejection.id, "user", user_input, self.cases_root
                     )

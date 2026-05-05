@@ -70,6 +70,7 @@ cp .env.example .env                  # Then fill in API key
 - Python 3.11+, PyYAML, PyMuPDF (`fitz`), python-docx, python-dotenv
 - Web: FastAPI + uvicorn (static files served from `web/static/`)
 - LLM: `anthropic`, `openai`, `google-generativeai`
+- Windows OCR: `winrt-runtime` + `winrt-Windows.*` packages (Windows 10 1803+; in `requirements.txt`; PyInstaller build needs `--collect-all winrt`)
 - CLI input: `prompt_toolkit` (optional — falls back to `input()` if not installed)
 - RAG: `chromadb` + `sentence-transformers` (optional — not in `requirements.txt`; needs C++ Build Tools)
 
@@ -94,7 +95,7 @@ Each type has a distinct analysis pipeline:
 
 | Type | Name | Steps | Key notes |
 |------|------|-------|-----------|
-| A | Prior Art (`prior_art`) | 5 | Novelty + inventive step unified; Step 4 always uses inventive step standard |
+| A | Prior Art (`prior_art`) | 6 | Steps 1–3: invention/citation/diff analysis; Steps 4–5: strategy + claim confirmation; Step 6: write English comment |
 | B | Clarity (`clarity`) | 3 | No citations; spec-internal analysis only |
 | C | Unity (`unity`) | 3 | Branches on `has_citations` flag — different Step 1 & 2 logic |
 | D | Other (`other`) | variable | Collaborate with user to determine analysis approach |
@@ -117,6 +118,24 @@ Supported models: Claude (`claude-sonnet-4-6`, `claude-haiku-4-5`), OpenAI (`gpt
 - **< 20 samples**: Few-shot mode — 3 most recently modified samples included in prompt
 - **≥ 20 samples**: Auto-switches to RAG mode — chromadb semantic search selects top 3 matches
 - Vector DB stored at `samples/vector_db/` (local, no server needed)
+
+### Web API Routes (`web/app.py`)
+
+Key endpoint groups consumed by `web/static/` (plain HTML/JS):
+
+| Group | Endpoints |
+|-------|-----------|
+| Cases | `GET /api/cases`, `POST /api/cases/{id}/upload`, `DELETE /api/cases/{id}` |
+| Parse | `POST /api/cases/{id}/parse`, `GET /api/cases/{id}/status` |
+| Steps | `GET /api/cases/{id}/rejections/{rid}/steps/{step}`, `POST …/execute` (SSE stream) |
+| Approve/review | `POST …/approve`, `POST …/cancel-approval`, `POST …/reopen` |
+| Citations OCR | `POST …/citations/{cit}/cancel-ocr`, `POST …/resume-ocr`, `GET …/ocr-status` |
+| Report | `POST /api/cases/{id}/report/draft` (SSE), `GET …/draft`, `POST …/finalize`, `GET …/download` |
+| Session | `DELETE /api/cases/{id}/session`, `GET …/files` |
+
+The `execute` and `report/draft` endpoints stream SSE chunks via `StreamingResponse`. The LLM client is lazily initialized once and shared across requests via a module-level lock.
+
+In PyInstaller builds, `OASIS_DATA_DIR` env var overrides where `cases/` and `samples/` are stored (defaults to the directory containing `main.py`/`web/app.py`).
 
 ### Session Persistence
 
@@ -151,7 +170,7 @@ samples/vector_db/                          ← chromadb store (auto-created, on
 prompts/{prior_art,clarity,unity,unity_with_citations,default,report}.txt
 ```
 
-**PDF OCR**: When a PDF page has no extractable text, `llm_client.ocr_image()` is called. It first tries Windows WinRT OCR via `powershell.exe` (no extra Python bindings needed, works in PyInstaller builds); if that fails or returns empty, it falls back to LLM Vision (Claude/OpenAI/Gemini). The full result is cached as `{stem}_ocr.txt` next to the PDF so subsequent reads skip the call entirely.
+**PDF OCR**: When a PDF page has no extractable text, `llm_client.ocr_image()` is called. It first tries Windows WinRT OCR via the `winrt-*` Python bindings (direct in-process call, no subprocess); if that fails or returns empty, it falls back to LLM Vision (Claude/OpenAI/Gemini). WinRT runs on a dedicated daemon `asyncio` loop (`_get_winrt_loop()`) so completion callbacks are always delivered. The full result is cached as `{stem}_ocr.txt` next to the PDF so subsequent reads skip the call entirely.
 
 ## Final Output Format (`final_comment.docx`)
 
