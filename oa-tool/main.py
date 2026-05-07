@@ -314,7 +314,7 @@ def _get_case_id(args) -> str:
     print("  OASIS — 특허 의견제출통지서 대응 자동화 시스템")
     print("=" * 70)
     while True:
-        case_id = _prompt("\n사건번호를 입력하세요 (예: KR-2024-12345): ")
+        case_id = _prompt("\n사건번호를 입력하세요 (예: PE12345.00 or KR10-2024-0012345): ")
         if case_id:
             return case_id
         print("  사건번호를 입력해 주세요.")

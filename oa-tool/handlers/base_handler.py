@@ -34,6 +34,19 @@ from session import (
 
 
 # ---------------------------------------------------------------------------
+# 안내 문구 마커 — 화면에는 표시하되 LLM 히스토리에서는 제거
+# ---------------------------------------------------------------------------
+
+GUIDANCE_MARKER = "<!-- oasis-guidance -->"
+
+
+def _strip_guidance(text: str) -> str:
+    """result에서 안내 문구 블록을 제거하여 LLM 히스토리용 텍스트를 반환한다."""
+    idx = text.find(GUIDANCE_MARKER)
+    return text[:idx].rstrip() if idx != -1 else text
+
+
+# ---------------------------------------------------------------------------
 # 특수 명령 상수
 # ---------------------------------------------------------------------------
 
@@ -183,7 +196,7 @@ class BaseHandler(ABC):
         while True:
             # LLM 호출 (최초: 빈 messages → 각 핸들러가 초기 프롬프트 구성)
             result = self.execute_step(step, messages)
-            messages.append({"role": "assistant", "content": result})
+            messages.append({"role": "assistant", "content": _strip_guidance(result)})
 
             # 파일 저장
             saved_path = save_step_result(

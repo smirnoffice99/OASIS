@@ -25,6 +25,9 @@ python test_report_generator.py
 python test_sample_manager.py
 python test_main.py
 
+# Run a single test method
+python -m unittest test_prior_art_handler.TestPriorArtHandler.test_step1 -v
+
 # Sample management
 python sample_manager.py add <file> --type <type>   # prior_art|clarity|unity|other
 python sample_manager.py list
@@ -47,11 +50,11 @@ cases/{case_id}/oa.pdf + spec.pdf + claims_en.docx [+ citations/]
     → report_generator.py — write final_comment.docx
 ```
 
-CLI (`main.py`) and web (`web/app.py`) share all modules above. The web app exposes REST + SSE endpoints consumed by `web/static/` (plain HTML/JS with no build step).
+CLI (`main.py`) and web (`web/app.py`) share all modules above. The web app exposes REST + SSE endpoints consumed by `web/static/` (plain HTML/JS, no build step, uses `marked.min.js` for Markdown rendering).
 
 ### Rejection Handlers (`handlers/`)
 
-`BaseHandler` owns the step loop: LLM call → print → await user input → save result. Subclasses implement `STEPS` (int) and `execute_step(step, feedback)`.
+`BaseHandler` owns the step loop: LLM call → print → await user input → save result. Subclasses implement `STEPS` (int) and `execute_step(step, messages)`.
 
 | Type | Handler | Steps | Notes |
 |------|---------|-------|-------|
@@ -60,17 +63,34 @@ CLI (`main.py`) and web (`web/app.py`) share all modules above. The web app expo
 | unity | `UnityHandler` | 3 | Branches on `has_citations` — different Step 1 & 2 logic |
 | other | `DefaultHandler` | variable | User-driven |
 
-Special commands handled in `BaseHandler`: `Y`/`승인` (approve), `종료` (save & exit), `재검토 N` (reopen rejection N), `승인취소` (undo last approval).
+Special commands handled in `BaseHandler`: `Y`/`승인` (approve), `종료` (save & exit), `재검토 N` (reopen rejection N), `승인취소` (undo last approval and go back one step).
 
 ### LLM Client (`llm_client.py`)
 
-Single gateway for all LLM calls. Provider/model set in `config.yaml` (currently: `gemini` / `gemini-2.5-flash`). Supports Claude, OpenAI, Gemini. Lazily initialized once with a module-level lock; shared across all web requests.
+Single gateway for all LLM calls. Provider/model set in `config.yaml`. Supports Claude, OpenAI, Gemini. Lazily initialized once with a module-level lock; shared across all web requests.
+
+Public methods: `chat()`, `chat_stream()`, `chat_messages()`, `chat_messages_stream()`, `ocr_image()`, `load_prompt()`.
 
 **OCR path**: image-only PDF pages → try Windows WinRT OCR first (via `winrt-*` Python bindings, no subprocess) → fall back to LLM Vision. WinRT runs on a dedicated daemon `asyncio` loop (`_get_winrt_loop()`) so completion callbacks are always delivered regardless of thread context. Results cached as `{stem}_ocr.txt`.
 
+### OA Parser (`oa_parser.py`)
+
+Non-obvious behaviors:
+- **Prior Art merging**: consecutive prior_art rejections (e.g., novelty + inventive step) are auto-merged into one `RejectionInfo` with combined claims/citations.
+- **Claims extraction priority**: `[심사결과]` summary table > block text (handles "청구항 전항", "제N항 내지 제M항", PDF digit-separation artifacts).
+- **Text normalization**: removes spaces inserted by PyMuPDF between Korean syllables.
+
 ### Session Persistence (`session.py`)
 
-`cases/{case_id}/session.json` tracks per-rejection `status` (`pending` / `in_progress` / `concluded`) and `current_step`. On restart, `concluded` rejections are skipped; others resume.
+`cases/{case_id}/session.json` tracks per-rejection `status` (`pending` / `in_progress` / `concluded`) and `current_step`. On restart, `concluded` rejections are skipped; others resume from `current_step`.
+
+### Report Generator (`report_generator.py`)
+
+Two generation modes:
+- **Combine** (`generate()` / CLI): uses handler's final step output directly, no extra LLM call per rejection.
+- **Structured** (web draft): LLM regenerates per-section (Summary / Analysis / Strategy) with optional feedback.
+
+Web flow: `generate_draft()` → saves `draft_comment.md` + `draft_data.json` → `finalize()` reads those and writes `final_comment.docx` (no LLM calls at finalize time).
 
 ### Sample Style Learning (`sample_manager.py`)
 
@@ -79,9 +99,28 @@ Single gateway for all LLM calls. Provider/model set in `config.yaml` (currently
 
 ### Web API (`web/app.py`)
 
-`execute` and `report/draft` endpoints stream SSE via `StreamingResponse`. Key groups: Cases CRUD, Parse, Steps (execute/approve/cancel-approval/reopen), Citations OCR, Report (draft/finalize/download), Session.
+`execute` and `report/draft` endpoints stream SSE via `StreamingResponse` with a 15 s keepalive ping and 300 s deadline. Key groups: Cases CRUD, Parse, Steps (execute / approve / cancel-approval / reopen), Citations OCR (cancel / resume with partial-progress tracking), Report (draft / finalize / download), Session.
+
+Notable: `GET /api/cases/{id}/rejections/{rid}/steps/{step}/dialogue` returns the full feedback history for a step.
 
 In PyInstaller builds, `OASIS_DATA_DIR` env var overrides where `cases/` and `samples/` are stored.
+
+## File Layout
+
+```
+cases/{case_id}/
+├── oa.pdf, spec.pdf, claims_en.docx
+├── citations/D1.pdf, ...
+├── citations/D1_ocr.txt, ...          ← OCR cache
+├── session.json
+├── rejection_N/
+│   ├── step_1_result.md … step_N_result.md
+│   ├── step_1_prompt.md …             ← web only: saved initial prompt for regeneration
+│   ├── dialogue.json
+│   └── conclusion.md
+├── draft_comment.md, draft_data.json  ← web report draft
+└── final_comment.docx
+```
 
 ## Core Rules
 

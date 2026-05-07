@@ -685,14 +685,21 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
     prompt_file = CASES_ROOT / case_id / f"rejection_{rid}" / f"step_{step}_prompt.md"
     result_file = CASES_ROOT / case_id / f"rejection_{rid}" / f"step_{step}_result.md"
 
+    _GUIDANCE_MARKER = "<!-- oasis-guidance -->"
+
+    def _strip_guidance(text: str) -> str:
+        idx = text.find(_GUIDANCE_MARKER)
+        return text[:idx].rstrip() if idx != -1 else text
+
     if feedback:
         initial_prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else ""
         prev_result = result_file.read_text(encoding="utf-8") if result_file.exists() else ""
-        if initial_prompt and prev_result:
+        prev_result_clean = _strip_guidance(prev_result)
+        if initial_prompt and prev_result_clean:
             # 멀티턴 구조: 이전 결과를 assistant 턴으로 제공 → LLM이 전체 재분석 없이 수정만 수행
             messages: list[dict] = [
                 {"role": "user",      "content": initial_prompt},
-                {"role": "assistant", "content": prev_result},
+                {"role": "assistant", "content": prev_result_clean},
                 {"role": "user",      "content": feedback},
             ]
         elif initial_prompt:
@@ -700,10 +707,10 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
             messages = [
                 {"role": "user", "content": initial_prompt + "\n\n---\n[수정 지시]\n" + feedback},
             ]
-        elif prev_result:
+        elif prev_result_clean:
             # 초기 프롬프트 파일이 없는 경우(이전 버전 결과): 이전 결과 + 수정 지시로 단일 메시지 구성
             messages = [
-                {"role": "user", "content": f"이전 분석 결과:\n{prev_result}\n\n---\n[수정 지시]\n{feedback}"},
+                {"role": "user", "content": f"이전 분석 결과:\n{prev_result_clean}\n\n---\n[수정 지시]\n{feedback}"},
             ]
         else:
             messages = [{"role": "user", "content": feedback}]

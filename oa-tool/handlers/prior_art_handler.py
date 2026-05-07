@@ -19,7 +19,13 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from handlers.base_handler import BaseHandler
+from handlers.base_handler import BaseHandler, GUIDANCE_MARKER
+
+def _has_multiple_claim_groups(result: str) -> bool:
+    """LLM Step 1 결과에 독립항 그룹이 2개 이상 존재하는지 감지한다."""
+    matches = re.findall(r'그룹\s*([0-9A-Za-z가-힣])', result)
+    return len(set(matches)) >= 2
+
 
 # 특허번호 인식 패턴 (US출원/등록, JP, KR, WO, EP)
 _PATENT_NUM_RE = re.compile(
@@ -84,6 +90,7 @@ class PriorArtHandler(BaseHandler):
     # ------------------------------------------------------------------
 
     def _step1_claimed_invention(self, messages: list[dict]) -> str:
+        is_first_run = not messages
         if not messages:
             claims_en = self._get_claims_en()
             spec = self._get_spec()
@@ -126,7 +133,17 @@ class PriorArtHandler(BaseHandler):
             messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat_messages(messages, system_prompt=system)
+        result = self.llm.chat_messages(messages, system_prompt=system)
+
+        if is_first_run and _has_multiple_claim_groups(result):
+            result += (
+                f"\n\n{GUIDANCE_MARKER}\n"
+                "\n---\n"
+                "> 💡 **안내**: 피드백 입력을 통해 현재 분석을 원하는 독립항 그룹을 선택하면 "
+                "이후 단계에서 더욱 원활한 분석이 가능합니다."
+            )
+
+        return result
 
     # ------------------------------------------------------------------
     # Step 2 — 인용발명 분석
@@ -226,6 +243,7 @@ class PriorArtHandler(BaseHandler):
     # ------------------------------------------------------------------
 
     def _step3_differences_and_inventive_step(self, messages: list[dict]) -> str:
+        is_first_run = not messages
         if not messages:
             step1_result = self._load_step_result(1)
             step2_result = self._load_step_result(2)
@@ -282,13 +300,23 @@ Step 1에서 식별한 대표 독립항(들) 각각에 대해, 심사관의 신�
             messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat_messages(messages, system_prompt=system)
+        result = self.llm.chat_messages(messages, system_prompt=system)
+
+        if is_first_run:
+            result += (
+                f"\n\n{GUIDANCE_MARKER}\n"
+                "\n---\n"
+                "> 💡 **안내**: 분석 결과의 수정이 필요한 경우 피드백을 입력해 주세요."
+            )
+
+        return result
 
     # ------------------------------------------------------------------
     # Step 4 — 전략 선택
     # ------------------------------------------------------------------
 
     def _step4_response_strategy(self, messages: list[dict]) -> str:
+        is_first_run = not messages
         if not messages:
             step3_path = (
                 self.cases_root / self.case_id
@@ -323,18 +351,36 @@ B) 보정 + 의견서 병행 전략
 
 이 내용은 변리사가 검토하고 최종 확정한다.
 
+[피드백 처리 규칙]
+변리사가 피드백으로 특정 전략을 선택하거나 수정 지시를 입력하면:
+- 선택된 전략만을 기준으로 응답하라. 이전 분석에서 다른 전략을 권고했거나 원래 프롬프트에 다른 전략이 기술되어 있더라도, 변리사의 선택이 절대적으로 우선한다.
+- 선택되지 않은 전략은 언급하거나 재분석하지 마라.
+- 보정안 제안 요청이 포함된 경우, 요청된 청구항에 대한 구체적인 보정안을 제시하라.
+
 출력 형식: 마크다운, A/B 섹션 + 권고안
 """
             messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat_messages(messages, system_prompt=system)
+        result = self.llm.chat_messages(messages, system_prompt=system)
+
+        if is_first_run:
+            result += (
+                f"\n\n{GUIDANCE_MARKER}\n"
+                "\n---\n"
+                "> 💡 **안내**: 전략의 선택 및 수정이 필요한 경우 피드백을 통해 세부사항을 입력해 주세요.\n"
+                ">\n"
+                "> 보정이 필요한 경우, 피드백을 통해 분석 대상 청구항의 보정안을 입력하면 더욱 원활한 분석이 가능합니다."
+            )
+
+        return result
 
     # ------------------------------------------------------------------
     # Step 5 — 대표청구항(독립항) 확정
     # ------------------------------------------------------------------
 
     def _step5_confirm_claims(self, messages: list[dict]) -> str:
+        is_first_run = not messages
         if not messages:
             step1_result = self._load_step_result(1)
             step4_result = self._load_step_result(4)
@@ -380,13 +426,23 @@ B) 보정 + 의견서 병행 전략
             messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat_messages(messages, system_prompt=system)
+        result = self.llm.chat_messages(messages, system_prompt=system)
+
+        if is_first_run:
+            result += (
+                f"\n\n{GUIDANCE_MARKER}\n"
+                "\n---\n"
+                "> 💡 **안내**: 확정 대상 독립항을 수정하고자 하는 경우 피드백을 통해 보정된 독립항을 입력해 주세요."
+            )
+
+        return result
 
     # ------------------------------------------------------------------
     # Step 6 — 영문 코멘트 작성
     # ------------------------------------------------------------------
 
     def _step6_write_comment(self, messages: list[dict]) -> str:
+        is_first_run = not messages
         if not messages:
             step4_result = self._load_step_result(4)
             step5_result = self._load_step_result(5)
@@ -435,6 +491,10 @@ WRITING RULES — follow strictly:
 [DEPENDENT CLAIMS]
 - Do NOT discuss dependent claims individually or at length.
 - One closing sentence only: "A similar argument can be made for the other independent claims."
+
+[CITED REFERENCE SCOPE]
+- When discussing a cited reference, focus primarily on the portions actually cited by the examiner in the rejection notice, and closely related portions.
+- Other portions of the cited reference should be mentioned only to the extent strictly necessary to support novelty and/or inventive step arguments, or to rebut the examiner's specific allegations. Do not summarize or introduce portions of the reference that are unrelated to those arguments.
 
 [CITED REFERENCE LIST]
 - List each reference as: "D1: [document number / title] ([date])"
@@ -501,7 +561,16 @@ Output format: Markdown with ## section headings.
             messages.append({"role": "user", "content": prompt})
 
         system = self.llm.load_prompt("prior_art")
-        return self.llm.chat_messages(messages, system_prompt=system)
+        result = self.llm.chat_messages(messages, system_prompt=system)
+
+        if is_first_run:
+            result += (
+                f"\n\n{GUIDANCE_MARKER}\n"
+                "\n---\n"
+                "> 💡 **안내**: 코멘트의 수정이 필요한 경우 피드백을 통해 필요사항을 입력해 주세요."
+            )
+
+        return result
 
     # ------------------------------------------------------------------
     # 파일 캐시 헬퍼

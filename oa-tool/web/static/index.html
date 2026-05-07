@@ -250,6 +250,12 @@
       animation: blink 0.8s infinite;
       color: var(--primary);
     }
+    .streaming-cursor:empty::before {
+      content: '분석중...';
+      animation: blink 0.8s infinite;
+      color: var(--primary);
+      font-size: 0.95rem;
+    }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 
     /* 플레이스홀더 */
@@ -536,7 +542,7 @@
     <!-- ① 사건번호 -->
     <div class="sidebar-section">
       <h3>① 사건번호</h3>
-      <input id="case-input" type="text" placeholder="KR-2024-12345" style="width:100%;" />
+      <input id="case-input" type="text" placeholder="PE12345.00 or KR10-2024-0012345" style="width:100%;" />
       <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;" id="quick-cases"></div>
     </div>
 
@@ -1708,7 +1714,6 @@ async function openUploadModal(afterStart = false) {
 }
 
 function _showUploadedFiles(files) {
-  // 각 파일 input 위에 이미 업로드된 파일명 표시
   const map = {
     'up-oa':     { key: 'oa',        labelId: 'up-oa-status'     },
     'up-spec':   { key: 'spec',      labelId: 'up-spec-status'   },
@@ -1719,11 +1724,17 @@ function _showUploadedFiles(files) {
     if (!statusEl) {
       statusEl = document.createElement('div');
       statusEl.id = labelId;
-      statusEl.style.cssText = 'font-size:0.75rem; color:#059669; margin-bottom:4px;';
       const inputEl = document.getElementById(inputId);
       inputEl.parentNode.insertBefore(statusEl, inputEl);
     }
-    statusEl.textContent = files[key] ? `✓ 현재: ${files[key]}` : '';
+    const fname = files[key];
+    if (fname) {
+      statusEl.style.cssText = 'font-size:0.8rem; color:#065f46; background:#ecfdf5; border:1px solid #6ee7b7; border-radius:5px; padding:6px 10px; margin-bottom:6px;';
+      statusEl.innerHTML = `✓ 현재 파일: <strong>${fname}</strong> <span style="color:#6b7280; font-size:0.72rem;">&nbsp;— 교체하려면 아래에서 새 파일을 선택하세요</span>`;
+    } else {
+      statusEl.style.cssText = '';
+      statusEl.innerHTML = '';
+    }
   }
 }
 
