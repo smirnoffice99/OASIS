@@ -49,6 +49,7 @@ class RejectionState:
         has_citations: bool,
         status: str = STATUS_PENDING,
         current_step: int = 0,
+        raw_text: str = "",
     ):
         self.id = id
         self.type = type
@@ -58,6 +59,7 @@ class RejectionState:
         self.has_citations = has_citations
         self.status = status
         self.current_step = current_step
+        self.raw_text = raw_text
 
     def to_dict(self) -> dict:
         return {
@@ -69,6 +71,7 @@ class RejectionState:
             "has_citations": self.has_citations,
             "status": self.status,
             "current_step": self.current_step,
+            "raw_text": self.raw_text,
         }
 
     @classmethod
@@ -82,6 +85,7 @@ class RejectionState:
             has_citations=d.get("has_citations", False),
             status=d.get("status", STATUS_PENDING),
             current_step=d.get("current_step", 0),
+            raw_text=d.get("raw_text", ""),
         )
 
     @classmethod
@@ -93,6 +97,7 @@ class RejectionState:
             claims=info.claims,
             citations=info.citations,
             has_citations=info.has_citations,
+            raw_text=info.raw_text,
         )
 
 

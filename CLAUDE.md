@@ -96,8 +96,8 @@ Each type has a distinct analysis pipeline:
 | Type | Name | Steps | Key notes |
 |------|------|-------|-----------|
 | A | Prior Art (`prior_art`) | 6 | Steps 1–3: invention/citation/diff analysis; Steps 4–5: strategy + claim confirmation; Step 6: write English comment |
-| B | Clarity (`clarity`) | 3 | No citations; spec-internal analysis only |
-| C | Unity (`unity`) | 3 | Branches on `has_citations` flag — different Step 1 & 2 logic |
+| B | Clarity (`clarity`) | 4 | No citations; spec-internal analysis only |
+| C | Unity (`unity`) | 4 | Branches on `has_citations` flag — different Step 1 & 2 logic |
 | D | Other (`other`) | variable | Collaborate with user to determine analysis approach |
 
 ### LLM Abstraction (`llm_client.py`)

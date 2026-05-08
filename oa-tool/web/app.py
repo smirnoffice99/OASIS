@@ -113,6 +113,20 @@ def _merge_feedbacks(accumulated: str, new_feedback: str) -> str:
     return accumulated + "\n\n" + new_feedback
 
 
+def _clear_step_dialogue(case_id: str, rid: int, step: int, cases_root: Path) -> None:
+    """dialogue.json에서 특정 step의 항목을 모두 삭제한다.
+
+    신규 실행 시 이전 대화 이력을 초기화하여 탭 전환 후 재로드 시
+    구 분석·피드백이 남아 있지 않도록 한다.
+    """
+    path = cases_root / case_id / f"rejection_{rid}" / "dialogue.json"
+    if not path.exists():
+        return
+    dialogue = json.loads(path.read_text(encoding="utf-8"))
+    cleaned = [e for e in dialogue if e.get("step") != step]
+    path.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # 핸들러 팩토리 (main.py와 동일한 로직)
 # ---------------------------------------------------------------------------
@@ -716,6 +730,8 @@ async def execute_step(case_id: str, rid: int, body: ExecuteRequest):
             messages = [{"role": "user", "content": feedback}]
     else:
         messages = []
+        prompt_file.unlink(missing_ok=True)  # 신규 실행 시 구 프롬프트 캐시 삭제 → 재실행 후 프롬프트 갱신 보장
+        _clear_step_dialogue(case_id, rid, step, CASES_ROOT)  # 신규 실행 시 이전 대화 이력 초기화
 
     # ------------------------------------------------------------------
     # 스트리밍 인터셉터 설정

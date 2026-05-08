@@ -59,11 +59,13 @@ CLI (`main.py`) and web (`web/app.py`) share all modules above. The web app expo
 | Type | Handler | Steps | Notes |
 |------|---------|-------|-------|
 | prior_art | `PriorArtHandler` | 6 | Steps 1–3: invention/citation/diff; Steps 4–5: strategy + claim confirmation; Step 6: English comment |
-| clarity | `ClarityHandler` | 3 | No citations; spec-internal analysis only |
-| unity | `UnityHandler` | 3 | Branches on `has_citations` — different Step 1 & 2 logic |
+| clarity | `ClarityHandler` | 4 | No citations; spec-internal analysis only |
+| unity | `UnityHandler` | 4 | Branches on `has_citations` — different Step 1 & 2 logic |
 | other | `DefaultHandler` | variable | User-driven |
 
 Special commands handled in `BaseHandler`: `Y`/`승인` (approve), `종료` (save & exit), `재검토 N` (reopen rejection N), `승인취소` (undo last approval and go back one step).
+
+**Guidance marker**: step results may contain `<!-- oasis-guidance -->` lines. These are rendered in the UI but stripped from the LLM message history so they never count as LLM output when the user requests regeneration.
 
 ### LLM Client (`llm_client.py`)
 
@@ -111,7 +113,9 @@ In PyInstaller builds, `OASIS_DATA_DIR` env var overrides where `cases/` and `sa
 cases/{case_id}/
 ├── oa.pdf, spec.pdf, claims_en.docx
 ├── citations/D1.pdf, ...
-├── citations/D1_ocr.txt, ...          ← OCR cache
+├── citations/D1_ocr.txt, ...          ← OCR cache (full result)
+├── citations/D1_ocr_partial.json, ... ← partial progress for mid-job resume
+├── citations/D1_ocr_progress.txt, ... ← current page counter
 ├── session.json
 ├── rejection_N/
 │   ├── step_1_result.md … step_N_result.md
