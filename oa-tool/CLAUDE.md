@@ -60,12 +60,16 @@ CLI (`main.py`) and web (`web/app.py`) share all modules above. The web app expo
 |------|---------|-------|-------|
 | prior_art | `PriorArtHandler` | 6 | Steps 1–3: invention/citation/diff; Steps 4–5: strategy + claim confirmation; Step 6: English comment |
 | clarity | `ClarityHandler` | 4 | No citations; spec-internal analysis only |
-| unity | `UnityHandler` | 4 | Branches on `has_citations` — different Step 1 & 2 logic |
-| other | `DefaultHandler` | variable | User-driven |
+| unity | `UnityHandler` | 4 | Branches on `has_citations` at `execute_step()` call time — different Step 1 & 2 prompt and logic |
+| other | `DefaultHandler` | variable | LLM plans dynamic steps; plan saved to `rejection_N/analysis_plan.json` |
 
-Special commands handled in `BaseHandler`: `Y`/`승인` (approve), `종료` (save & exit), `재검토 N` (reopen rejection N), `승인취소` (undo last approval and go back one step).
+Special commands handled in `BaseHandler`: `Y`/`승인` (approve), `종료` (save & exit), `재검토 N` (reopen rejection N), `승인취소` (undo last approval and go back one step — deletes stale `step_N_result.md`).
 
-**Guidance marker**: step results may contain `<!-- oasis-guidance -->` lines. These are rendered in the UI but stripped from the LLM message history so they never count as LLM output when the user requests regeneration.
+**`execute_step(step, messages)` contract**:
+- Initial call: `messages=[]` → handler constructs full system prompt + user message and calls `llm.chat()`
+- Feedback call: `messages=[{user: initial_prompt}, {assistant: prev_result}, {user: feedback}]` → handler calls `llm.chat_messages(messages)` so LLM sees full context
+
+**Guidance marker**: step results may contain `<!-- oasis-guidance -->` lines. These are rendered in the UI but stripped from LLM message history so they never count as LLM output when the user requests regeneration.
 
 ### LLM Client (`llm_client.py`)
 
@@ -73,18 +77,21 @@ Single gateway for all LLM calls. Provider/model set in `config.yaml`. Supports 
 
 Public methods: `chat()`, `chat_stream()`, `chat_messages()`, `chat_messages_stream()`, `ocr_image()`, `load_prompt()`.
 
-**OCR path**: image-only PDF pages → try Windows WinRT OCR first (via `winrt-*` Python bindings, no subprocess) → fall back to LLM Vision. WinRT runs on a dedicated daemon `asyncio` loop (`_get_winrt_loop()`) so completion callbacks are always delivered regardless of thread context. Results cached as `{stem}_ocr.txt`.
+**OCR path**: image-only PDF pages → try Windows WinRT OCR first (via `winrt-*` Python bindings, no subprocess) → fall back to LLM Vision. WinRT runs on a dedicated daemon `asyncio` loop (`_get_winrt_loop()`) — a single long-lived loop in a daemon thread — so completion callbacks are always delivered regardless of the calling thread context. For each page WinRT tries Korean (`ko`) and English (`en-US`) and returns whichever produces the longer text. Results cached as `{stem}_ocr.txt`.
 
 ### OA Parser (`oa_parser.py`)
 
 Non-obvious behaviors:
 - **Prior Art merging**: consecutive prior_art rejections (e.g., novelty + inventive step) are auto-merged into one `RejectionInfo` with combined claims/citations.
-- **Claims extraction priority**: `[심사결과]` summary table > block text (handles "청구항 전항", "제N항 내지 제M항", PDF digit-separation artifacts).
-- **Text normalization**: removes spaces inserted by PyMuPDF between Korean syllables.
+- **Claims extraction priority**: `[심사결과]` summary table > block text (handles "청구항 전항", "제N항 내지 제M항", PDF digit-separation artifacts). Claim ranges with span ≥ 500 are rejected as parser artifacts.
+- **Text normalization**: removes spaces inserted by PyMuPDF between Korean syllables (applied repeatedly until stable).
+- **Citation ID normalization**: "인용발명 N" / "인용문헌 N" → "DN"; duplicates removed while preserving discovery order.
 
 ### Session Persistence (`session.py`)
 
 `cases/{case_id}/session.json` tracks per-rejection `status` (`pending` / `in_progress` / `concluded`) and `current_step`. On restart, `concluded` rejections are skipped; others resume from `current_step`.
+
+`create_session()` **deletes all existing `rejection_N/` folders** before writing a new session — prevents stale step results from a previous parse from polluting the workspace.
 
 ### Report Generator (`report_generator.py`)
 
@@ -92,7 +99,7 @@ Two generation modes:
 - **Combine** (`generate()` / CLI): uses handler's final step output directly, no extra LLM call per rejection.
 - **Structured** (web draft): LLM regenerates per-section (Summary / Analysis / Strategy) with optional feedback.
 
-Web flow: `generate_draft()` → saves `draft_comment.md` + `draft_data.json` → `finalize()` reads those and writes `final_comment.docx` (no LLM calls at finalize time).
+Web flow: `generate_draft()` → saves `draft_comment.md` + `draft_data.json` → `finalize()` reads those and writes `final_comment.docx` (no LLM calls at finalize time). `draft_data.json` structure: `{"sections": [{rejection_meta, raw_comment, summary, analysis, strategy}, ...], "overall": {...}}`.
 
 ### Sample Style Learning (`sample_manager.py`)
 
@@ -101,11 +108,24 @@ Web flow: `generate_draft()` → saves `draft_comment.md` + `draft_data.json` �
 
 ### Web API (`web/app.py`)
 
-`execute` and `report/draft` endpoints stream SSE via `StreamingResponse` with a 15 s keepalive ping and 300 s deadline. Key groups: Cases CRUD, Parse, Steps (execute / approve / cancel-approval / reopen), Citations OCR (cancel / resume with partial-progress tracking), Report (draft / finalize / download), Session.
+SSE streaming: `execute` endpoints send `": keepalive\n\n"` every 15 s. Step execution has a **1800 s** deadline (accommodates OCR + LLM); report draft has a **600 s** deadline. Key endpoint groups: Cases CRUD, Parse, Steps (execute / approve / cancel-approval / reopen), Citations OCR (cancel / resume with partial-progress tracking), Report (draft / finalize / download), Session.
+
+**Citation OCR pipeline** (triggered on upload if image pages detected):
+- Upload rejects PDFs with > 100 image pages.
+- Phase 1 (main thread): sequential page text extraction / PNG rendering — fitz is not thread-safe so this stays single-threaded.
+- Phase 2 (thread pool, 4 workers): parallel `llm.ocr_image()` calls for image-only pages.
+- Cancellation: each citation gets a `threading.Event` in `_ocr_cancel_events` (keyed `"case_id/citation_id"`); uploading the same file again cancels any running OCR.
+- Resumption: only contiguous successfully-OCR'd pages are preserved in `_ocr_partial.json`; the next run starts from the first failed page.
+
+**Step prompt caching** (web only): `step_N_prompt.md` is saved on first (no-feedback) execution and reused as the fixed initial prompt for all subsequent feedback regenerations. A fresh execution (no prior feedback) deletes any existing prompt cache first.
 
 Notable: `GET /api/cases/{id}/rejections/{rid}/steps/{step}/dialogue` returns the full feedback history for a step.
 
 In PyInstaller builds, `OASIS_DATA_DIR` env var overrides where `cases/` and `samples/` are stored.
+
+### PyInstaller Build (`launcher.py`, `oasis.spec`)
+
+`launcher.py` is the entry point. On startup it detects `sys.frozen`, creates `{exe_dir}/oasis_data/`, copies `prompts/` from the bundle on first run, sets `OASIS_DATA_DIR`, then starts FastAPI in a background thread and opens the browser. `oasis.spec` explicitly lists hidden imports and uses `collect_all('winrt')` for the WinRT OCR package.
 
 ## File Layout
 
@@ -119,11 +139,15 @@ cases/{case_id}/
 ├── session.json
 ├── rejection_N/
 │   ├── step_1_result.md … step_N_result.md
-│   ├── step_1_prompt.md …             ← web only: saved initial prompt for regeneration
+│   ├── step_1_prompt.md …             ← web only: initial prompt cache for regeneration
+│   ├── analysis_plan.json             ← DefaultHandler only: dynamic step plan
 │   ├── dialogue.json
 │   └── conclusion.md
 ├── draft_comment.md, draft_data.json  ← web report draft
 └── final_comment.docx
+
+prompts/                               ← one .txt per handler type + report
+    prior_art.txt, clarity.txt, unity.txt, unity_with_citations.txt, default.txt, report.txt
 ```
 
 ## Core Rules
