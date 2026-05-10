@@ -2,6 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Setup
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+pip install -r requirements.txt
+cp .env.example .env            # then fill in at least one API key
+# Optional: pip install prompt_toolkit  — enables resizable multi-line CLI input (Enter submits, Alt+Enter newline)
+```
+
+Edit `config.yaml` to select provider/model (default: `gemini / gemini-2.5-flash`).
+
 ## Commands
 
 ```bash
@@ -64,6 +76,10 @@ CLI (`main.py`) and web (`web/app.py`) share all modules above. The web app expo
 | other | `DefaultHandler` | variable | LLM plans dynamic steps; plan saved to `rejection_N/analysis_plan.json` |
 
 Special commands handled in `BaseHandler`: `Y`/`승인` (approve), `종료` (save & exit), `재검토 N` (reopen rejection N), `승인취소` (undo last approval and go back one step — deletes stale `step_N_result.md`).
+
+`_input_height` is a **class-level variable** (not per-instance) — the resizable CLI input height (Ctrl+Shift+↑/↓, 1–20 lines) persists across all steps and handlers within a single process run.
+
+`BaseHandler.read_citation(name)` tries these paths in order: bare name → `.pdf` → `.txt` → `_mock.txt` → `_mock.pdf` (all under `cases/{id}/citations/`). If a pre-built `{stem}_ocr.txt` exists beside a PDF, it is returned immediately without opening the PDF.
 
 **`execute_step(step, messages)` contract**:
 - Initial call: `messages=[]` → handler constructs full system prompt + user message and calls `llm.chat()`
